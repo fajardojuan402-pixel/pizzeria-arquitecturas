@@ -1,0 +1,332 @@
+/* styles.css — Estilos compartidos por la vista de jugador y el panel profesor.
+   Diseno simple y responsivo: se ve bien en laptop y en celular. */
+
+:root {
+  --rojo: #c8102e;
+  --verde: #2e8b57;
+  --amarillo: #f2b705;
+  --gris: #6b7280;
+  --gris-claro: #f3f4f6;
+  --oscuro: #1f2937;
+  --azul: #2563eb;
+  --borde: #e5e7eb;
+  --sombra: 0 2px 8px rgba(0, 0, 0, 0.08);
+  --radio: 12px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: linear-gradient(160deg, #fff7ed 0%, #fef2f2 100%);
+  color: var(--oscuro);
+  min-height: 100vh;
+  line-height: 1.45;
+}
+
+.wrap {
+  max-width: 820px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.wrap.ancho {
+  max-width: 1100px;
+}
+
+header.top {
+  text-align: center;
+  padding: 8px 0 4px;
+}
+
+header.top h1 {
+  margin: 4px 0;
+  font-size: 1.5rem;
+}
+
+header.top .sub {
+  color: var(--gris);
+  font-size: 0.9rem;
+}
+
+.card {
+  background: #fff;
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+  box-shadow: var(--sombra);
+  padding: 16px;
+  margin: 12px 0;
+}
+
+h2 {
+  font-size: 1.15rem;
+  margin: 0 0 10px;
+}
+
+label {
+  display: block;
+  font-weight: 600;
+  margin: 10px 0 4px;
+  font-size: 0.9rem;
+}
+
+input[type="text"],
+input[type="password"] {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--borde);
+  border-radius: 8px;
+  font-size: 1rem;
+}
+
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  background: var(--azul);
+  color: #fff;
+  transition: transform 0.05s ease, opacity 0.2s;
+}
+
+button:hover {
+  opacity: 0.92;
+}
+
+button:active {
+  transform: translateY(1px);
+}
+
+button:disabled {
+  background: #cbd5e1;
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+button.rojo {
+  background: var(--rojo);
+}
+button.verde {
+  background: var(--verde);
+}
+button.gris {
+  background: var(--gris);
+}
+button.amarillo {
+  background: var(--amarillo);
+  color: #3b2f00;
+}
+button.ghost {
+  background: #fff;
+  color: var(--oscuro);
+  border: 1px solid var(--borde);
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.row.between {
+  justify-content: space-between;
+  align-items: center;
+}
+
+.pill {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  background: var(--gris-claro);
+  color: var(--oscuro);
+}
+.pill.verde {
+  background: #dcfce7;
+  color: #166534;
+}
+.pill.rojo {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.pill.amarillo {
+  background: #fef3c7;
+  color: #92400e;
+}
+.pill.azul {
+  background: #dbeafe;
+  color: #1e40af;
+}
+.pill.gris {
+  background: #e5e7eb;
+  color: #374151;
+}
+
+.hidden {
+  display: none !important;
+}
+
+/* Botones de ingredientes */
+.ingredientes {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+.ingredientes button {
+  background: #fff;
+  color: var(--oscuro);
+  border: 2px solid var(--borde);
+}
+.ingredientes button.next {
+  border-color: var(--verde);
+  box-shadow: 0 0 0 2px rgba(46, 139, 87, 0.15);
+}
+
+/* Receta / progreso */
+.receta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+}
+.receta .ing {
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: var(--gris-claro);
+  font-size: 0.85rem;
+  border: 1px solid var(--borde);
+}
+.receta .ing.hecho {
+  background: #dcfce7;
+  border-color: #86efac;
+  text-decoration: line-through;
+  color: #166534;
+}
+
+/* Tarjetas de pizza (Ronda 2 y 3) */
+.pizzas {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
+}
+.pizza {
+  border: 1px solid var(--borde);
+  border-radius: var(--radio);
+  padding: 12px;
+  background: #fff;
+}
+.pizza h3 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+.pizza .estado {
+  font-size: 0.8rem;
+  color: var(--gris);
+  margin-bottom: 6px;
+}
+
+/* Cronometro / bloqueo */
+.aviso-bloqueo {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  padding: 12px;
+  border-radius: 8px;
+  text-align: center;
+  font-weight: 700;
+}
+
+.barra {
+  height: 12px;
+  background: var(--gris-claro);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 6px 0;
+}
+.barra > span {
+  display: block;
+  height: 100%;
+  background: var(--amarillo);
+  transition: width 0.3s linear;
+}
+
+.espera {
+  text-align: center;
+  padding: 32px 16px;
+}
+.espera .big {
+  font-size: 1.3rem;
+  font-weight: 700;
+  margin: 8px 0;
+}
+
+/* Atenuado para "descansando" (serverless) */
+.descansando {
+  filter: grayscale(1);
+  opacity: 0.55;
+}
+
+/* Tabla comparativa del profesor */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+}
+th,
+td {
+  border: 1px solid var(--borde);
+  padding: 8px;
+  text-align: left;
+}
+th {
+  background: var(--gris-claro);
+}
+
+.grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+@media (max-width: 720px) {
+  .grid2 {
+    grid-template-columns: 1fr;
+  }
+}
+
+.mini {
+  font-size: 0.8rem;
+  color: var(--gris);
+}
+
+.toast {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--oscuro);
+  color: #fff;
+  padding: 10px 16px;
+  border-radius: 8px;
+  box-shadow: var(--sombra);
+  z-index: 50;
+}
+
+.narrativa {
+  background: #f0f9ff;
+  border-left: 4px solid var(--azul);
+  padding: 10px 12px;
+  border-radius: 6px;
+  margin-top: 8px;
+  font-size: 0.9rem;
+}
+
+.preguntas li {
+  margin: 8px 0;
+}

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pizzeria de Arquitecturas — Panel del Profesor</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="wrap ancho">
+      <header class="top">
+        <h1>🎛️ Panel del Profesor</h1>
+        <div class="sub">Controla ambas salas · inicia rondas manualmente · sigue las metricas</div>
+      </header>
+
+      <!-- Ingreso por clave -->
+      <section id="login" class="card">
+        <h2>Acceso de control</h2>
+        <label for="clave">Clave del profesor</label>
+        <input id="clave" type="password" placeholder="clave" />
+        <div class="row" style="margin-top:10px">
+          <button id="btnEntrar">Entrar</button>
+        </div>
+        <p id="errorLogin" class="pill rojo hidden"></p>
+      </section>
+
+      <!-- Panel -->
+      <section id="panel" class="hidden">
+        <div class="grid2" id="salas"></div>
+
+        <div class="card">
+          <h2>📊 Tabla comparativa (acumulada, en vivo)</h2>
+          <div id="tablaComparativa"></div>
+        </div>
+      </section>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="/ws-client.js"></script>
+    <script src="/prof.js"></script>
+  </body>
+</html>

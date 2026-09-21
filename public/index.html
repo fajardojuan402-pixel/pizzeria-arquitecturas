@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pizzeria de Arquitecturas — Jugador</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="top">
+        <h1>🍕 Pizzeria de Arquitecturas</h1>
+        <div class="sub">Actividad de clase — monolito · microservicios · serverless</div>
+      </header>
+
+      <!-- PANTALLA DE INICIO: nombre + eleccion de sala -->
+      <section id="inicio" class="card">
+        <h2>Unirse a una sala</h2>
+        <label for="nombre">Tu nombre</label>
+        <input id="nombre" type="text" placeholder="Ej. Ana" maxlength="20" />
+        <label>Elige sala (2 a 3 jugadores por sala)</label>
+        <div class="row">
+          <button class="ghost" data-sala="sala1" id="btnSala1">Sala 1</button>
+          <button class="ghost" data-sala="sala2" id="btnSala2">Sala 2</button>
+        </div>
+        <p id="errorInicio" class="pill rojo hidden"></p>
+      </section>
+
+      <!-- ZONA DE JUEGO (se rellena dinamicamente) -->
+      <section id="juego" class="hidden">
+        <div class="card">
+          <div class="row between">
+            <div>
+              <strong id="salaNombre"></strong>
+              <span id="miRol" class="pill azul"></span>
+            </div>
+            <span id="conteo" class="pill gris"></span>
+          </div>
+          <div id="listaJugadores" class="mini" style="margin-top:6px"></div>
+        </div>
+
+        <div id="contenido"></div>
+      </section>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+
+    <script src="/ws-client.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

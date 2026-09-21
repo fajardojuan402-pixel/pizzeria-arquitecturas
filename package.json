@@ -1,0 +1,22 @@
+{
+  "name": "pizzeria-arquitecturas",
+  "version": "1.0.0",
+  "description": "Actividad educativa multijugador en tiempo real que simula arquitecturas de software (monolito, microservicios, serverless) usando una pizzeria como metafora.",
+  "main": "server/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "test": "node test/run.js"
+  },
+  "keywords": [
+    "educacion",
+    "arquitectura-software",
+    "websocket",
+    "tiempo-real"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
