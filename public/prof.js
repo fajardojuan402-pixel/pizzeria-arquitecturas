@@ -70,11 +70,30 @@ sock.on('estado-profesor', (data) => {
 
 function renderPanel(data) {
   const cont = $('#salas');
+  const tabla = $('#tablaComparativa');
+  // BUG 1 — preservar la posicion de scroll de las listas largas al re-render
+  // (el panel se reconstruye entero en cada actualizacion por WebSocket).
+  const scrollSalas = cont.scrollTop;
+  const scrollTabla = tabla.scrollTop;
+  const scrollPagina = window.scrollY;
+
   cont.innerHTML = '';
   ['sala1', 'sala2'].forEach((id) => {
     cont.appendChild(tarjetaSala(data.salas[id]));
   });
   renderTabla(data.salas);
+
+  cont.scrollTop = scrollSalas;
+  tabla.scrollTop = scrollTabla;
+  window.scrollTo(0, scrollPagina);
+}
+
+/** Formatea milisegundos como mm:ss para la cuenta regresiva. */
+function formatoTiempo(ms) {
+  const total = Math.max(0, Math.ceil((ms || 0) / 1000));
+  const m = Math.floor(total / 60);
+  const seg = total % 60;
+  return `${m}:${String(seg).padStart(2, '0')}`;
 }
 
 function tarjetaSala(sala) {
@@ -89,6 +108,17 @@ function tarjetaSala(sala) {
 
   // Estado exacto de la sala.
   card.appendChild(estadoPill(sala));
+
+  // Cronometro de la ronda en curso + pedidos completados en vivo.
+  if (sala.estado === 'jugando') {
+    const cronRow = el('div', 'row');
+    cronRow.style.margin = '4px 0';
+    const restante = sala.tiempoRestanteMs || 0;
+    const cls = restante <= 30000 ? 'rojo' : restante <= 120000 ? 'amarillo' : 'azul';
+    cronRow.appendChild(el('span', 'pill ' + cls, '⏱ ' + formatoTiempo(restante)));
+    cronRow.appendChild(el('span', 'pill gris', `Completados: ${sala.completadosActual || 0}`));
+    card.appendChild(cronRow);
+  }
 
   // Jugadores y sus roles.
   if (sala.jugadores.length) {
@@ -152,7 +182,7 @@ function renderTabla(salas) {
   const tabla = el('table');
 
   const thead = el('tr');
-  ['Sala', 'Ronda', 'Arquitectura', 'Tiempo (s)', 'Fallas/Bloqueos', 'Extra'].forEach((h) =>
+  ['Sala', 'Ronda', 'Arquitectura', 'Tiempo', 'Pedidos', 'Fallas/Bloqueos', 'Extra'].forEach((h) =>
     thead.appendChild(el('th', null, h))
   );
   tabla.appendChild(thead);
@@ -168,7 +198,10 @@ function renderTabla(salas) {
       tr.appendChild(el('td', null, sid === 'sala1' ? 'Sala 1' : 'Sala 2'));
       tr.appendChild(el('td', null, 'Ronda ' + n));
       tr.appendChild(el('td', null, r.titulo));
-      tr.appendChild(el('td', null, (r.tiempoTotalMs / 1000).toFixed(1)));
+      // Tiempo total (~10 min). Mostramos min:seg para que sea legible.
+      tr.appendChild(el('td', null, formatoTiempo(r.tiempoTotalMs)));
+      // Pedidos completados en ese lapso: el dato clave para comparar rondas.
+      tr.appendChild(el('td', null, String(r.completados != null ? r.completados : '—')));
 
       let fallas = '—';
       if (r.ronda === 1) fallas = `${r.bloqueos} bloqueo(s)`;

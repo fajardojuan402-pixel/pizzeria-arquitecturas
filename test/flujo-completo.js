@@ -6,11 +6,14 @@
  *   1. El profesor entra con su clave y ve ambas salas.
  *   2. Reglas de cupo: 2 minimo, 3 maximo, "Sala llena" al 4o.
  *   3. La sala se cierra al iniciar la 1a ronda (ya no entra un 3o).
- *   4. Ronda 1 (monolito): elegir cocinero + armar 5 pizzas.
- *   5. Ronda 2 (microservicios): reparto por estaciones + 5 pizzas en paralelo.
+ *   4. Ronda 1 (monolito): elegir cocinero + jugar por TIEMPO (pedidos infinitos).
+ *   5. Ronda 2 (microservicios): reparto por estaciones + pizzas por tiempo.
  *   6. Ronda 3 (serverless): activo/descansando, hora pico, cold start + preguntas.
  *   7. Reconexion por nombre (< 1 min) conserva el mismo jugador.
  *   8. El profesor ve la tabla comparativa acumulada de las 3 rondas.
+ *
+ * Las rondas terminan por TIEMPO. Para no esperar 10 min reales, el runner
+ * (test/run.js) arranca el servidor con PIZZA_DURACION_RONDA_MS corto.
  *
  * Uso: arrancar el servidor y luego `node test/flujo-completo.js`.
  * Sale con codigo 0 si todo pasa, 1 si algo falla.
@@ -51,38 +54,48 @@ async function joinPlayer(sala, nombre) {
   };
 }
 
-/** Juega una Ronda 1 (monolito) hasta completarla. `cocinero` coloca todo. */
+// Las rondas ahora terminan por TIEMPO (no por 5 pedidos). Los helpers de juego
+// completan pizzas lo mas rapido posible y observan la secuencia de pedidos hasta
+// que la ronda pasa a 'completada' (por el cronometro). Devuelven metricas del
+// observador: pedidos vistos y si hubo repeticiones consecutivas / hora pico.
+
+const TOPE_MS = 60000; // guarda de seguridad para el bucle del test
+
+/** Juega una Ronda 1 (monolito) hasta que termina por tiempo. */
 async function jugarRonda1(cocinero) {
+  const info = { pedidosVistos: [], repiteConsecutivo: false };
   const t0 = Date.now();
-  while (cocinero.st.estado === 'jugando' && Date.now() - t0 < 130000) {
+  while (cocinero.st.estado === 'jugando' && Date.now() - t0 < TOPE_MS) {
     const r = cocinero.st.ronda;
-    if (!r || r.fase !== 'jugando') {
-      await sleep(50);
+    if (!r || r.fase !== 'jugando' || r.bloqueado || !r.pedidoActual) {
+      await sleep(r && r.bloqueado ? 200 : 40);
       continue;
     }
-    if (r.bloqueado) {
-      await sleep(250);
-      continue;
+    // Registrar cambios de pedido para verificar "sin repetir consecutivo".
+    const nombre = r.pedidoActual.nombre;
+    const ultimo = info.pedidosVistos[info.pedidosVistos.length - 1];
+    if (nombre !== ultimo) {
+      if (ultimo && nombre === ultimo) info.repiteConsecutivo = true;
+      info.pedidosVistos.push(nombre);
     }
-    const pedido = r.pedidoActual;
-    if (!pedido) {
-      await sleep(50);
-      continue;
-    }
-    const sig = pedido.ingredientes[r.progreso.length];
+    const sig = r.pedidoActual.ingredientes[r.progreso.length];
     if (sig) cocinero.p.emit('colocar-ingrediente', { ingrediente: sig });
-    await sleep(40);
+    await sleep(25);
   }
+  // Recalcular repeticiones consecutivas sobre la secuencia observada.
+  info.repiteConsecutivo = tieneRepeticionConsecutiva(info.pedidosVistos);
+  return info;
 }
 
 /** Juega una Ronda 2 (microservicios): cada responsable trabaja su estacion. */
 async function jugarRonda2(players, asignacion) {
   const any = players[Object.keys(players)[0]];
+  const info = { pedidosVistos: [] };
   const t0 = Date.now();
-  while (any.st.estado === 'jugando' && Date.now() - t0 < 130000) {
+  while (any.st.estado === 'jugando' && Date.now() - t0 < TOPE_MS) {
     const r = any.st.ronda;
     if (!r || r.fase !== 'jugando') {
-      await sleep(50);
+      await sleep(40);
       continue;
     }
     for (const pizza of r.pizzas) {
@@ -98,8 +111,9 @@ async function jugarRonda2(players, asignacion) {
         if (sig) resp.p.emit('colocar-ingrediente', { pizzaId: pizza.id, ingrediente: sig });
       }
     }
-    await sleep(45);
+    await sleep(30);
   }
+  return info;
 }
 
 /** Juega una Ronda 3 (serverless): los que descansan ayudan en hora pico. */
@@ -107,15 +121,17 @@ async function jugarRonda3(players) {
   const ids = Object.keys(players);
   const any = players[ids[0]];
   let vioHoraPico = false;
+  let vioNormal = false;
   const t0 = Date.now();
-  while (any.st.estado === 'jugando' && Date.now() - t0 < 130000) {
+  while (any.st.estado === 'jugando' && Date.now() - t0 < TOPE_MS) {
     const r = any.st.ronda;
     if (!r || r.fase !== 'jugando') {
-      await sleep(50);
+      await sleep(40);
       continue;
     }
+    if (r.horaPico) vioHoraPico = true;
+    else vioNormal = true;
     if (r.horaPico) {
-      vioHoraPico = true;
       for (const pid of ids) {
         if (r.estados[pid] === 'descansando') players[pid].p.emit('entrar-a-ayudar');
       }
@@ -128,9 +144,15 @@ async function jugarRonda3(players) {
         if (sig) players[pid].p.emit('colocar-ingrediente', { pizzaId: pizza.id, ingrediente: sig });
       }
     }
-    await sleep(60);
+    await sleep(35);
   }
-  return vioHoraPico;
+  return { vioHoraPico, vioNormal };
+}
+
+/** ¿La secuencia observada tiene dos pedidos iguales seguidos? */
+function tieneRepeticionConsecutiva(seq) {
+  for (let i = 1; i < seq.length; i++) if (seq[i] === seq[i - 1]) return true;
+  return false;
 }
 
 (async () => {
@@ -176,6 +198,16 @@ async function jugarRonda3(players) {
   await sleep(200);
   check(a.st.ronda.fase === 'jugando' && a.st.ronda.cocineroId === a.id, '6. Cocinero elegido, ronda en juego');
 
+  // ---- CRONOMETRO: la ronda arranca con cuenta regresiva ----
+  check(
+    typeof a.st.ronda.tiempoRestanteMs === 'number' && a.st.ronda.tiempoRestanteMs > 0,
+    `6-crono. La ronda expone cuenta regresiva (tiempoRestanteMs=${a.st.ronda.tiempoRestanteMs}ms)`
+  );
+  check(
+    pst.salas.sala1.tiempoRestanteMs > 0,
+    '6-crono2. El profesor ve el cronometro de la sala en curso'
+  );
+
   // ---- DECOYS: verificar la cuadricula gigante de la Ronda 1 ----
   const grid1 = a.st.ronda.grid || [];
   const esperado1 = a.st.ronda.pedidoActual.ingredientes[a.st.ronda.progreso.length];
@@ -197,10 +229,13 @@ async function jugarRonda3(players) {
   check(a.st.ronda.progreso.length === progAntes + 1, '6e. Clic correcto SI avanza el progreso');
   check((a.st.ronda.grid || []).join('|') !== gridAntes, '6f. La cuadricula se vuelve a mezclar tras el acierto');
 
-  await jugarRonda1(a);
-  check(a.st.estado === 'completada', '7. Ronda 1 completada (5 pizzas)');
-  check(a.st.resultados[1] && a.st.resultados[1].ronda === 1, '   Llega resultado de Ronda 1 con narrativa');
-  console.log('   ->', a.st.resultados[1].narrativa);
+  const infoR1 = await jugarRonda1(a);
+  check(a.st.estado === 'completada', '7. Ronda 1 termina automaticamente por TIEMPO');
+  const res1 = a.st.resultados[1];
+  check(res1 && res1.ronda === 1, '   Llega resultado de Ronda 1 con narrativa');
+  check(res1 && res1.completados >= 1, `7a. Resultado reporta pedidos completados: ${res1 && res1.completados}`);
+  check(!infoR1.repiteConsecutivo, '7b. Los pedidos NO se repiten dos veces seguidas (R1)');
+  console.log(`   -> ${res1.narrativa}\n   -> pedidos R1: [${infoR1.pedidosVistos.join(', ')}]`);
 
   // ---- RONDA 2: microservicios (3 jugadores, reparto automatico) ----
   console.log('Ronda 2 (microservicios)...');
@@ -221,9 +256,11 @@ async function jugarRonda3(players) {
   check(tamanos2.every((n) => n >= 8), `8c. Cada estacion incluye sus decoys (varias casillas): [${tamanos2.join(', ')}]`);
   check(Math.max(...tamanos2) < grid1.length, '8d. Cada estacion es notablemente mas manejable que el mar de la Ronda 1');
   await jugarRonda2({ [a.id]: a, [b.id]: b, [c.id]: c }, r2.asignacion);
-  check(a.st.estado === 'completada', '9. Ronda 2 completada (5 pizzas en paralelo)');
-  check(a.st.resultados[2] && a.st.resultados[2].ronda === 2, '   Llega resultado de Ronda 2 (fallas, resto activo)');
-  console.log('   ->', a.st.resultados[2].narrativa);
+  check(a.st.estado === 'completada', '9. Ronda 2 termina automaticamente por TIEMPO');
+  const res2 = a.st.resultados[2];
+  check(res2 && res2.ronda === 2, '   Llega resultado de Ronda 2 (fallas, resto activo)');
+  check(res2 && res2.completados >= 1, `9a. Resultado reporta pedidos completados: ${res2 && res2.completados}`);
+  console.log('   ->', res2.narrativa);
 
   // ---- RONDA 3: serverless ----
   console.log('Ronda 3 (serverless)...');
@@ -237,11 +274,14 @@ async function jugarRonda3(players) {
   const grids3 = r3.grids || {};
   const tamanos3 = Object.values(grids3).map((g) => g.length);
   check(tamanos3.length >= 1 && tamanos3.every((n) => n >= 20 && n <= 35), `10a. Cuadricula de decoys por pizza (20-35, acotada): [${tamanos3.join(', ')}]`);
-  const vioHoraPico = await jugarRonda3({ [a.id]: a, [b.id]: b, [c.id]: c });
-  check(a.st.estado === 'completada', '11. Ronda 3 completada (5 pedidos)');
-  check(a.st.resultados[3] && a.st.resultados[3].ronda === 3, '   Llega resultado de Ronda 3 (cold starts)');
+  const infoR3 = await jugarRonda3({ [a.id]: a, [b.id]: b, [c.id]: c });
+  check(a.st.estado === 'completada', '11. Ronda 3 termina automaticamente por TIEMPO');
+  const res3 = a.st.resultados[3];
+  check(res3 && res3.ronda === 3, '   Llega resultado de Ronda 3 (cold starts)');
+  check(res3 && res3.completados >= 1, `11a. Resultado reporta pedidos completados: ${res3 && res3.completados}`);
+  check(infoR3.vioHoraPico || infoR3.vioNormal, '11b. Se generaron rafagas (normal y/o hora pico)');
   check(a.st.mostrarPreguntas === true && a.st.preguntas.length > 0, '12. Preguntas de discusion visibles al terminar Ronda 3');
-  console.log(`   -> ${a.st.resultados[3].narrativa} (hora pico: ${vioHoraPico})`);
+  console.log(`   -> ${res3.narrativa} (hora pico observada: ${infoR3.vioHoraPico})`);
 
   // ---- Tabla comparativa del profesor ----
   const rp = pst.salas.sala1.resultados;
@@ -262,6 +302,20 @@ async function jugarRonda3(players) {
   prof.emit('reiniciar-ronda', { salaId: 'sala1', numero: 1 });
   await sleep(250);
   check(aRe.st.ronda && aRe.st.ronda.tipo === 1 && aRe.st.ronda.fase === 'elegir-cocinero', '15. Profesor puede reiniciar una ronda ya jugada');
+
+  // ---- Secuencia distinta en cada partida (no memorizable) ----
+  // Jugamos otra vez la Ronda 1 y comparamos su secuencia de pedidos con la
+  // anterior. Con pizzas al azar deben diferir (salvo coincidencia rarisima).
+  aRe.p.emit('elegir-cocinero', { playerId: aRe.id });
+  await sleep(200);
+  const infoR1b = await jugarRonda1(aRe);
+  check(!infoR1b.repiteConsecutivo, '15a. En el reinicio tampoco se repite pedido consecutivo');
+  const seqA = infoR1.pedidosVistos.join(',');
+  const seqB = infoR1b.pedidosVistos.join(',');
+  check(
+    seqA !== seqB || infoR1.pedidosVistos.length <= 1,
+    `15b. La secuencia de pedidos cambia entre partidas (no memorizable)\n       run1: [${seqA}]\n       run2: [${seqB}]`
+  );
 
   // ---- Resumen ----
   console.log('\n============================================');

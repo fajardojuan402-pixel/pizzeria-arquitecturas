@@ -11,9 +11,17 @@ const path = require('path');
 
 const PORT = process.env.PORT || 3555;
 const CLAVE = process.env.CLAVE_PROFESOR || 'profe2024';
+// Ronda corta para la prueba: las rondas duran por TIEMPO (10 min en produccion),
+// pero para el test las reducimos a unos segundos con esta variable de entorno.
+const DURACION = process.env.PIZZA_DURACION_RONDA_MS || '5000';
 const ROOT = path.join(__dirname, '..');
 
-const env = { ...process.env, PORT: String(PORT), CLAVE_PROFESOR: CLAVE };
+const env = {
+  ...process.env,
+  PORT: String(PORT),
+  CLAVE_PROFESOR: CLAVE,
+  PIZZA_DURACION_RONDA_MS: String(DURACION),
+};
 // Evitamos heredar un NODE_OPTIONS roto del entorno (preload inexistente).
 delete env.NODE_OPTIONS;
 
