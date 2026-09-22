@@ -19,6 +19,12 @@ const {
   INGREDIENTES,
   PEDIDOS,
   ESTACIONES,
+  DECOYS,
+  TODOS_LOS_DECOYS,
+  GRID_R1_MIN,
+  GRID_R1_MAX,
+  GRID_R2_MIN,
+  GRID_R2_MAX,
   PEDIDOS_POR_RONDA,
   BLOQUEO_MS,
   COLD_START_MS,
@@ -54,6 +60,83 @@ function generarPedidos(n = PEDIDOS_POR_RONDA) {
     out.push({ nombre: base.nombre, ingredientes: base.ingredientes.slice() });
   }
   return out;
+}
+
+// =========================================================================
+// CUADRICULAS DE INGREDIENTES CON SEÑUELOS (DECOYS)
+// =========================================================================
+// El SERVIDOR es dueño de la cuadricula visible (reales + decoys) y de su orden.
+// Asi todos los jugadores ven exactamente la misma pantalla, y podemos volver a
+// mezclar (reshuffle) tras cada clic correcto simplemente reconstruyendo el
+// array y reenviando el estado. Los decoys nunca se validan como progreso: eso
+// se controla aparte en _r1Colocar/_r2Colocar/_r3Colocar.
+
+/**
+ * Arma una cuadricula barajada respetando un rango [min, max] de casillas.
+ *   - `reales`  : ingredientes reales que SIEMPRE se muestran (nunca se recortan).
+ *   - `decoys`  : señuelos candidatos (segun la ronda: propios de la estacion o
+ *                 de todas las familias).
+ * Reglas de tamaño:
+ *   - Elige un objetivo aleatorio dentro de [min, max].
+ *   - Si hay demasiados decoys, toma una MUESTRA al azar para no pasar del max.
+ *   - Si no alcanzan para llegar al min (p.ej. una estacion de 1 ingrediente con
+ *     pocos decoys), se muestran TODOS los que haya: el tamaño natural es valido
+ *     bajo aislamiento estricto (no metemos familias ajenas para inflar).
+ */
+function armarGrid(reales, decoys, min, max) {
+  const realesUnicos = [...new Set(reales)];
+  const objetivo = min + Math.floor(Math.random() * (max - min + 1));
+  const cuposDecoys = Math.max(0, objetivo - realesUnicos.length);
+
+  // Candidatos de decoy sin duplicar y sin chocar con un ingrediente real.
+  const candidatos = baraja([...new Set(decoys)].filter((d) => !realesUnicos.includes(d)));
+  const elegidos = candidatos.slice(0, cuposDecoys);
+
+  return baraja([...realesUnicos, ...elegidos]);
+}
+
+/**
+ * Cuadricula de la RONDA 1 (MONOLITO): un mar de 60-80 casillas revueltas.
+ * Incluye:
+ *   - los ingredientes REALES de la receta actual,
+ *   - los decoys de cada ingrediente de esa receta (9-10 c/u),
+ *   - ademas decoys de ingredientes que NI SIQUIERA estan en la receta (relleno).
+ * Sin agrupar por familia: todo mezclado, para simular el caos de un monolito
+ * sin separacion de responsabilidades. Cabe todo el catalogo de decoys (90),
+ * asi que siempre alcanza el rango 60-80.
+ */
+function gridRonda1(ingredientesReceta) {
+  const reales = ingredientesReceta.slice();
+  // Decoys candidatos = TODOS (los de la receta + los de familias ajenas de relleno).
+  return armarGrid(reales, TODOS_LOS_DECOYS, GRID_R1_MIN, GRID_R1_MAX);
+}
+
+/**
+ * Cuadricula por ESTACION para Ronda 2/3 (MICROSERVICIOS/SERVERLESS): apunta a
+ * 25-35 casillas revueltas, pero SOLO con lo de esa estacion: sus ingredientes
+ * reales + los decoys de esos ingredientes (aislamiento: una estacion nunca
+ * muestra lo de otra). Estaciones grandes (Toppings) se recortan al max; las muy
+ * pequeñas (Quesos = 1 ingrediente) muestran todos sus decoys aunque queden por
+ * debajo de 25 — es correcto bajo aislamiento y sigue siendo mucho mas manejable
+ * que el mar de la Ronda 1, que es lo que buscamos que se sienta.
+ */
+function gridEstacion(ingredientesEstacion) {
+  const reales = [];
+  const poolPropio = [];
+  for (const ing of ingredientesEstacion) {
+    reales.push(ing);
+    if (DECOYS[ing]) poolPropio.push(...DECOYS[ing]);
+  }
+  return armarGrid(reales, poolPropio, GRID_R2_MIN, GRID_R2_MAX);
+}
+
+/**
+ * Cuadricula por PIZZA para la Ronda 3 (SERVERLESS): misma logica de decoys y
+ * tamaño (25-35) que una estacion, pero construida desde los ingredientes de la
+ * receta de esa pizza. El jugador activo trabaja pizzas completas, no estaciones.
+ */
+function gridPizza(ingredientesPizza) {
+  return gridEstacion(ingredientesPizza);
 }
 
 // --- Modelo de estado -----------------------------------------------------
@@ -287,12 +370,22 @@ class GameEngine {
       cocineroId: null,
       bloqueado: false,
       bloqueoHasta: 0,
+      // grid: cuadricula visible (reales + decoys) en orden ya barajado. La
+      // rearmamos en cada clic correcto para forzar re-lectura (reshuffle).
+      grid: [],
       inicio: null, // se fija cuando arranca de verdad (tras elegir cocinero)
       fin: null,
       metricas: { completados: 0, bloqueos: 0 },
     };
     // Reset de roles.
     for (const j of conectados) j.rol = null;
+  }
+
+  /** (Re)construye y baraja la cuadricula gigante de la Ronda 1 segun la receta. */
+  _rebuildGridRonda1(sala) {
+    const r = sala.ronda;
+    const pedido = r.pedidos[r.indice];
+    r.grid = pedido ? gridRonda1(pedido.ingredientes) : [];
   }
 
   /** Un jugador se postula/elige como cocinero (primera eleccion gana). */
@@ -310,6 +403,7 @@ class GameEngine {
     sala.ronda.cocineroId = objetivo;
     sala.ronda.fase = 'jugando';
     sala.ronda.inicio = ahora();
+    this._rebuildGridRonda1(sala); // primera cuadricula al arrancar
     for (const j of this.jugadoresConectados(sala)) {
       j.rol = j.id === objetivo ? 'Cocinero' : 'Observador';
     }
@@ -336,6 +430,10 @@ class GameEngine {
       siguientePedido: 0,
       // asignacion: estacionId -> playerId (quien es responsable)
       asignacion: {},
+      // grids: cuadricula (reales + decoys, barajada) POR estacion. Cada estacion
+      // solo muestra lo suyo (aislamiento de microservicios). Se re-baraja cuando
+      // esa estacion hace un clic correcto.
+      grids: {},
       // bloqueos por estacion: estacionId -> timestamp hasta
       bloqueos: {},
       inicio: tresJugadores ? ahora() : null,
@@ -357,6 +455,7 @@ class GameEngine {
         sala.ronda.asignacion[est.id] = jugador.id;
       });
       this._sincronizarRolesRonda2(sala);
+      this._initGridsRonda2(sala); // cuadricula de decoys por estacion
       this._lanzarSiguientePizza(sala);
     }
     // Con 2 jugadores esperamos a que confirmen roles (confirmarRolesRonda2).
@@ -387,6 +486,7 @@ class GameEngine {
     sala.ronda.fase = 'jugando';
     sala.ronda.inicio = ahora();
     this._sincronizarRolesRonda2(sala);
+    this._initGridsRonda2(sala); // cuadricula de decoys por estacion
     this._lanzarSiguientePizza(sala);
     this.onUpdate(sala.id);
     return { ok: true };
@@ -403,6 +503,19 @@ class GameEngine {
     for (const j of this.jugadoresConectados(sala)) {
       j.rol = porJugador[j.id] ? porJugador[j.id].join(' + ') : 'Observador';
     }
+  }
+
+  /** Construye la cuadricula (reales + decoys) de cada estacion, ya barajada. */
+  _initGridsRonda2(sala) {
+    for (const est of ESTACIONES) {
+      sala.ronda.grids[est.id] = gridEstacion(est.ingredientes);
+    }
+  }
+
+  /** Re-baraja SOLO la cuadricula de una estacion (tras un clic correcto ahi). */
+  _reshuffleGridEstacion(sala, estacionId) {
+    const est = ESTACIONES.find((e) => e.id === estacionId);
+    if (est) sala.ronda.grids[estacionId] = gridEstacion(est.ingredientes);
   }
 
   /** Mete la siguiente pizza pendiente al flujo (estado = primera estacion). */
@@ -443,6 +556,10 @@ class GameEngine {
       estados: {},
       coldHasta: {}, // playerId -> timestamp fin de cold start
       pizzasActivas: [], // pizzas visibles de la rafaga actual
+      // grids: cuadricula (reales + decoys, barajada) POR pizza activa. Misma
+      // logica de decoys que la Ronda 2 (tamaño manejable 25-35), independiente
+      // por cada pizza de la rafaga; se re-baraja al hacer un clic correcto.
+      grids: {},
       inicio: ahora(),
       fin: null,
       metricas: { completados: 0, coldStarts: 0, tiempoColdMs: 0 },
@@ -484,6 +601,9 @@ class GameEngine {
     const rafaga = r.secuencia[r.rafagaIndice];
     r.pizzasActivas = rafaga.pizzas.map((p) => ({ ...p, progreso: [], completada: false }));
     r.horaPicoActual = rafaga.horaPico;
+    // Cuadricula de decoys por cada pizza visible de la rafaga (ya barajada).
+    r.grids = {};
+    for (const p of r.pizzasActivas) r.grids[p.id] = gridPizza(p.ingredientes);
   }
 
   /** Un jugador que descansa decide "Entrar a ayudar" -> inicia cold start. */
@@ -564,9 +684,15 @@ class GameEngine {
     const pedido = r.pedidos[r.indice];
     if (!pedido) return;
     const esperado = pedido.ingredientes[r.progreso.length];
-    if (ingrediente !== esperado) return; // ingrediente incorrecto: se ignora
+    // VALIDACION ANTI-DECOY: solo el string EXACTO del ingrediente real esperado
+    // avanza el pedido. Cualquier decoy (variante, error de tipeo, otra familia)
+    // no coincide con `esperado` y se ignora aqui -> nunca cuenta como progreso.
+    // El servidor es autoritativo: aunque el cliente enviara un decoy, no pasa.
+    if (ingrediente !== esperado) return;
 
     r.progreso.push(ingrediente);
+    // Clic correcto -> volvemos a mezclar la cuadricula para obligar a re-leer.
+    this._rebuildGridRonda1(sala);
 
     if (r.progreso.length === pedido.ingredientes.length) {
       // Pizza completada.
@@ -577,6 +703,8 @@ class GameEngine {
       if (r.indice >= r.pedidos.length) {
         return this._finalizarRonda(sala);
       }
+      // Nueva receta -> nueva cuadricula (con sus propios decoys), ya barajada.
+      this._rebuildGridRonda1(sala);
       // Tira el dado: 1 o 2 -> bloqueo de 20s (el monolito entero se detiene).
       if (dado() <= 2) {
         r.bloqueado = true;
@@ -621,9 +749,13 @@ class GameEngine {
       this.onUpdate(sala.id);
       return;
     }
-    if (ingrediente !== esperado) return; // incorrecto: ignorar
+    // VALIDACION ANTI-DECOY: solo el ingrediente real esperado de ESTA estacion
+    // avanza. Los decoys de la cuadricula de la estacion no coinciden y se ignoran.
+    if (ingrediente !== esperado) return;
 
     pizza.progresoEstacion.push(ingrediente);
+    // Clic correcto -> re-barajamos la cuadricula de ESTA estacion (reshuffle).
+    this._reshuffleGridEstacion(sala, estacion.id);
     if (pizza.progresoEstacion.length === requeridosAqui.length) {
       this._r2AvanzarEstacion(sala, pizza);
     }
@@ -690,9 +822,13 @@ class GameEngine {
     const pizza = r.pizzasActivas.find((p) => p.id === pizzaId && !p.completada);
     if (!pizza) return;
     const esperado = pizza.ingredientes[pizza.progreso.length];
+    // VALIDACION ANTI-DECOY: solo el ingrediente real esperado avanza la pizza;
+    // los decoys de la cuadricula no coinciden y se ignoran (nunca son progreso).
     if (ingrediente !== esperado) return;
 
     pizza.progreso.push(ingrediente);
+    // Clic correcto -> re-barajamos la cuadricula de ESTA pizza (reshuffle).
+    r.grids[pizza.id] = gridPizza(pizza.ingredientes);
     if (pizza.progreso.length === pizza.ingredientes.length) {
       pizza.completada = true;
     }
@@ -870,6 +1006,8 @@ class GameEngine {
         total: r.pedidos.length,
         bloqueado: r.bloqueado,
         bloqueoRestanteMs: r.bloqueado ? Math.max(0, r.bloqueoHasta - ahora()) : 0,
+        // Cuadricula gigante (reales + decoys) ya barajada por el servidor.
+        grid: r.grid || [],
         metricas: r.metricas,
       };
     }
@@ -892,6 +1030,8 @@ class GameEngine {
         bloqueos: Object.fromEntries(
           Object.entries(r.bloqueos).map(([k, v]) => [k, Math.max(0, v - ahora())])
         ),
+        // Cuadricula (reales + decoys) barajada POR estacion.
+        grids: r.grids || {},
         completados: r.metricas.completados,
         total: r.pedidos.length,
         metricas: r.metricas,
@@ -913,6 +1053,8 @@ class GameEngine {
           progreso: p.progreso,
           completada: p.completada,
         })),
+        // Cuadricula (reales + decoys) barajada POR pizza activa.
+        grids: r.grids || {},
         completados: r.metricas.completados,
         total: r.secuencia.length,
         metricas: r.metricas,

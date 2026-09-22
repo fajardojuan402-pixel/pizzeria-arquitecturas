@@ -175,6 +175,28 @@ async function jugarRonda3(players) {
   a.p.emit('elegir-cocinero', { playerId: a.id });
   await sleep(200);
   check(a.st.ronda.fase === 'jugando' && a.st.ronda.cocineroId === a.id, '6. Cocinero elegido, ronda en juego');
+
+  // ---- DECOYS: verificar la cuadricula gigante de la Ronda 1 ----
+  const grid1 = a.st.ronda.grid || [];
+  const esperado1 = a.st.ronda.pedidoActual.ingredientes[a.st.ronda.progreso.length];
+  check(grid1.length >= 60 && grid1.length <= 80, `6a. Cuadricula R1 gigante (60-80 casillas): ${grid1.length}`);
+  check(grid1.includes(esperado1), '6b. La cuadricula contiene el ingrediente correcto');
+  const reales = ['Base', 'Salsa', 'Queso', 'Pepperoni', 'Jamon', 'Pina', 'Champinones', 'Aceitunas', 'Cebolla'];
+  const decoysEnGrid = grid1.filter((x) => !reales.includes(x));
+  check(decoysEnGrid.length >= 40, `6c. Muchos decoys mezclados en la cuadricula: ${decoysEnGrid.length}`);
+  // Clic en un DECOY no debe avanzar el progreso.
+  const progAntes = a.st.ronda.progreso.length;
+  const unDecoy = decoysEnGrid[0];
+  a.p.emit('colocar-ingrediente', { ingrediente: unDecoy });
+  await sleep(120);
+  check(a.st.ronda.progreso.length === progAntes, `6d. Clic en decoy ("${unDecoy}") NO cuenta como progreso`);
+  // Clic correcto SI avanza y re-baraja la cuadricula.
+  const gridAntes = (a.st.ronda.grid || []).join('|');
+  a.p.emit('colocar-ingrediente', { ingrediente: esperado1 });
+  await sleep(120);
+  check(a.st.ronda.progreso.length === progAntes + 1, '6e. Clic correcto SI avanza el progreso');
+  check((a.st.ronda.grid || []).join('|') !== gridAntes, '6f. La cuadricula se vuelve a mezclar tras el acierto');
+
   await jugarRonda1(a);
   check(a.st.estado === 'completada', '7. Ronda 1 completada (5 pizzas)');
   check(a.st.resultados[1] && a.st.resultados[1].ronda === 1, '   Llega resultado de Ronda 1 con narrativa');
@@ -188,6 +210,16 @@ async function jugarRonda3(players) {
   check(r2 && r2.tipo === 2 && r2.fase === 'jugando', '8. Ronda 2 con 3 jugadores arranca directo (reparto auto)');
   const responsables = new Set(Object.values(r2.asignacion));
   check(Object.keys(r2.asignacion).length === 3 && responsables.size === 3, '   3 estaciones repartidas a 3 responsables');
+  // ---- DECOYS Ronda 2: cuadricula POR estacion, con muchos decoys pero acotada ----
+  // Nota: el tope es 35. El piso 25 solo aplica a estaciones con suficientes
+  // ingredientes; una estacion de 1 solo ingrediente (Quesos) muestra todos sus
+  // ~10 decoys y queda por debajo de 25 -> es correcto bajo aislamiento estricto.
+  const grids2 = r2.grids || {};
+  const tamanos2 = Object.values(grids2).map((g) => g.length);
+  check(tamanos2.length === 3, '8a. Hay una cuadricula de decoys por cada estacion');
+  check(tamanos2.every((n) => n <= 35), `8b. Ninguna estacion pasa de 35 casillas: [${tamanos2.join(', ')}]`);
+  check(tamanos2.every((n) => n >= 8), `8c. Cada estacion incluye sus decoys (varias casillas): [${tamanos2.join(', ')}]`);
+  check(Math.max(...tamanos2) < grid1.length, '8d. Cada estacion es notablemente mas manejable que el mar de la Ronda 1');
   await jugarRonda2({ [a.id]: a, [b.id]: b, [c.id]: c }, r2.asignacion);
   check(a.st.estado === 'completada', '9. Ronda 2 completada (5 pizzas en paralelo)');
   check(a.st.resultados[2] && a.st.resultados[2].ronda === 2, '   Llega resultado de Ronda 2 (fallas, resto activo)');
@@ -201,6 +233,10 @@ async function jugarRonda3(players) {
   check(r3 && r3.tipo === 3, '10. Ronda 3 inicia');
   check(Object.values(r3.estados).filter((s) => s === 'activo').length === 1, '   Exactamente 1 jugador activo al inicio');
   check(Object.values(r3.estados).filter((s) => s === 'descansando').length === 2, '   Los otros 2 descansando');
+  // ---- DECOYS Ronda 3: cuadricula POR pizza activa (misma logica que R2, <=35) ----
+  const grids3 = r3.grids || {};
+  const tamanos3 = Object.values(grids3).map((g) => g.length);
+  check(tamanos3.length >= 1 && tamanos3.every((n) => n >= 20 && n <= 35), `10a. Cuadricula de decoys por pizza (20-35, acotada): [${tamanos3.join(', ')}]`);
   const vioHoraPico = await jugarRonda3({ [a.id]: a, [b.id]: b, [c.id]: c });
   check(a.st.estado === 'completada', '11. Ronda 3 completada (5 pedidos)');
   check(a.st.resultados[3] && a.st.resultados[3].ronda === 3, '   Llega resultado de Ronda 3 (cold starts)');
