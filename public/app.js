@@ -184,8 +184,13 @@ function vistaRonda1(s, r) {
 
   if (soyCocinero) {
     const siguiente = pedido.ingredientes[r.progreso.length];
+    // La cuadricula (reales + decoys) la arma y baraja el SERVIDOR (r.grid);
+    // aqui solo la pintamos. Es un mar de casillas parecidas: hay que leer bien.
     card.appendChild(
-      panelIngredientes(pedido.ingredientes, siguiente, (ing) => {
+      el('div', 'mini', `🔎 Busca el ingrediente correcto entre ${r.grid.length} opciones parecidas`)
+    );
+    card.appendChild(
+      panelIngredientes(r.grid, siguiente, (ing) => {
         sock.emit('colocar-ingrediente', { ingrediente: ing });
       })
     );
@@ -242,8 +247,11 @@ function vistaRonda2(s, r) {
     const puedo = est && r.asignacion[est.id] === (s.yo && s.yo.id) && !(r.bloqueos[est.id] > 0);
     if (puedo && requeridosAqui.length) {
       const siguiente = requeridosAqui[p.progresoEstacion.length];
+      // Cuadricula de decoys de ESTA estacion (solo lo suyo: aislamiento). La
+      // arma/baraja el servidor en r.grids[est.id]; misma para todas sus pizzas.
+      const grid = (r.grids && r.grids[est.id]) || requeridosAqui;
       box.appendChild(
-        panelIngredientes(requeridosAqui, siguiente, (ing) => {
+        panelIngredientes(grid, siguiente, (ing) => {
           sock.emit('colocar-ingrediente', { pizzaId: p.id, ingrediente: ing });
         })
       );
@@ -344,17 +352,26 @@ function vistaRonda3(s, r) {
   }
 
   // Pizzas de la rafaga actual.
-  const cont = el('div', 'pizzas' + (miEstado !== 'activo' ? ' descansando' : ''));
+  // Durante el cold start (o mientras se descansa) la cuadricula se ve atenuada
+  // y NO es clicable: la instancia aun no esta "caliente". Solo al terminar los
+  // 10s (miEstado === 'activo') se habilita.
+  const bloqueadaCuadricula = miEstado !== 'activo';
+  const cont = el('div', 'pizzas' + (bloqueadaCuadricula ? ' descansando' : ''));
   r.pizzas.forEach((p) => {
     const box = el('div', 'pizza');
     box.appendChild(el('h3', null, p.nombre + (p.completada ? ' ✅' : '')));
     box.appendChild(recetaProgreso(p.ingredientes, p.progreso));
-    if (miEstado === 'activo' && !p.completada) {
+    if (!p.completada) {
       const siguiente = p.ingredientes[p.progreso.length];
+      // Cuadricula de decoys de ESTA pizza (la arma/baraja el servidor).
+      const grid = (r.grids && r.grids[p.id]) || p.ingredientes;
       box.appendChild(
-        panelIngredientes(p.ingredientes, siguiente, (ing) => {
-          sock.emit('colocar-ingrediente', { pizzaId: p.id, ingrediente: ing });
-        })
+        panelIngredientes(
+          grid,
+          siguiente,
+          (ing) => sock.emit('colocar-ingrediente', { pizzaId: p.id, ingrediente: ing }),
+          bloqueadaCuadricula // deshabilitada si no estoy activo (cold start/descanso)
+        )
       );
     }
     cont.appendChild(box);
@@ -380,21 +397,56 @@ function recetaProgreso(ingredientes, progreso) {
 }
 
 /**
- * Panel de botones de ingredientes. Resalta el siguiente esperado.
- * Mostramos SOLO los ingredientes relevantes (los de la pizza/estacion),
- * mas algunos distractores para que haya que fijarse — aqui simple: solo los
- * relevantes para no frustrar en clase.
+ * Panel/cuadricula de ingredientes con SEÑUELOS (decoys).
+ *
+ * `grid` viene del servidor ya barajado y contiene el/los ingrediente(s) real(es)
+ * mezclados con muchos decoys parecidos. El objetivo didactico es obligar a LEER
+ * cada palabra: no basta con recordar una posicion (ademas el servidor vuelve a
+ * barajar tras cada acierto, asi que el layout cambia constantemente).
+ *
+ * Reglas de interaccion:
+ *  - Un clic en el ingrediente correcto (== `siguiente`) llama a onClick y el
+ *    servidor avanza el pedido (que a su vez reenvia un grid re-barajado).
+ *  - Un clic en un decoy (o en un ingrediente fuera de orden) NO avanza nada:
+ *    damos feedback visual breve (parpadeo rojo de esa casilla) SIN penalizacion
+ *    de tiempo. No emitimos al servidor para no generar trafico inutil; de todos
+ *    modos el servidor tambien lo rechazaria (validacion anti-decoy autoritativa).
+ *  - Si `disabled` es true (p.ej. cold start en Ronda 3), toda la cuadricula se
+ *    ve atenuada y no responde a clics.
+ *
+ * IMPORTANTE: NO reordenamos ni deduplicamos aqui — respetamos el orden revuelto
+ * que mando el servidor (mezcla de familias distintas, sin agrupar por tipo).
  */
-function panelIngredientes(relevantes, siguiente, onClick) {
-  const cont = el('div', 'ingredientes');
-  // Usamos el set de ingredientes de la pizza/estacion (sin duplicados).
-  const unicos = [...new Set(relevantes)];
-  unicos.forEach((ing) => {
-    const b = el('button', ing === siguiente ? 'next' : '', ing);
-    b.onclick = () => onClick(ing);
+function panelIngredientes(grid, siguiente, onClick, disabled) {
+  const cont = el('div', 'ingredientes' + (disabled ? ' bloqueada' : ''));
+  grid.forEach((ing) => {
+    const esCorrecto = ing === siguiente;
+    // No marcamos con clase 'next' el correcto: delataria la respuesta. La
+    // dificultad es justamente encontrarlo leyendo.
+    const b = el('button', 'casilla', ing);
+    if (disabled) {
+      b.disabled = true;
+    } else {
+      b.onclick = () => {
+        if (esCorrecto) {
+          onClick(ing); // acierto: el servidor avanza y re-baraja
+        } else {
+          flashError(b); // decoy o fuera de orden: parpadeo rojo, sin avanzar
+        }
+      };
+    }
     cont.appendChild(b);
   });
   return cont;
+}
+
+/** Parpadeo rojo breve de una casilla al hacer clic en un decoy (sin penalizar). */
+function flashError(btn) {
+  btn.classList.remove('error'); // reinicia por si se repite rapido
+  // Forzamos reflow para poder re-disparar la animacion consecutivamente.
+  void btn.offsetWidth;
+  btn.classList.add('error');
+  setTimeout(() => btn.classList.remove('error'), 450);
 }
 
 function barra(fraccion) {
