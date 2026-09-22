@@ -204,7 +204,31 @@ function esIngredienteReal(texto) {
   return INGREDIENTES.includes(texto);
 }
 
-// Pedidos que debe completar cada ronda antes de terminar.
+/**
+ * Elige un pedido al AZAR del catalogo, evitando repetir el mismo dos veces
+ * seguidas. `pedidoAnterior` es el nombre del ultimo pedido servido (o null).
+ * Asi la secuencia es distinta en cada partida y no se puede memorizar.
+ */
+function elegirPedidoAleatorio(pedidoAnterior) {
+  // Candidatos = todos menos el anterior (si hay mas de uno, siempre habra opciones).
+  const candidatos = PEDIDOS.filter((p) => p.nombre !== pedidoAnterior);
+  const pool = candidatos.length ? candidatos : PEDIDOS;
+  const base = pool[Math.floor(Math.random() * pool.length)];
+  return { nombre: base.nombre, ingredientes: base.ingredientes.slice() };
+}
+
+// Duracion FIJA de cada ronda: 10 minutos. La ronda termina por TIEMPO, no por
+// cantidad de pedidos (los pedidos se generan indefinidamente hasta que se agota).
+// Se puede acortar con la variable de entorno PIZZA_DURACION_RONDA_MS (util para
+// pruebas automatizadas, que no pueden esperar 10 minutos reales).
+const DURACION_RONDA_MS = Number(process.env.PIZZA_DURACION_RONDA_MS) || 10 * 60 * 1000; // 600000 ms
+
+// Probabilidad de que el proximo pedido de la Ronda 3 sea "¡HORA PICO!".
+// (~28%: valor razonable dentro del rango sugerido 25-30%.)
+const PROB_HORA_PICO = 0.28;
+
+// (Historico) cantidad de referencia de pedidos; ya NO controla el fin de ronda,
+// que ahora es por tiempo. Se conserva por compatibilidad de imports.
 const PEDIDOS_POR_RONDA = 5;
 
 // Duracion (ms) del bloqueo cuando el "dado" saca 1 o 2.
@@ -233,6 +257,9 @@ module.exports = {
   GRID_R2_MIN,
   GRID_R2_MAX,
   esIngredienteReal,
+  elegirPedidoAleatorio,
+  DURACION_RONDA_MS,
+  PROB_HORA_PICO,
   PEDIDOS_POR_RONDA,
   BLOQUEO_MS,
   COLD_START_MS,

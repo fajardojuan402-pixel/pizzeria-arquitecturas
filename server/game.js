@@ -17,7 +17,6 @@
 
 const {
   INGREDIENTES,
-  PEDIDOS,
   ESTACIONES,
   DECOYS,
   TODOS_LOS_DECOYS,
@@ -25,7 +24,9 @@ const {
   GRID_R1_MAX,
   GRID_R2_MIN,
   GRID_R2_MAX,
-  PEDIDOS_POR_RONDA,
+  elegirPedidoAleatorio,
+  DURACION_RONDA_MS,
+  PROB_HORA_PICO,
   BLOQUEO_MS,
   COLD_START_MS,
   PREGUNTAS_DISCUSION,
@@ -52,14 +53,13 @@ function baraja(arr) {
   return a;
 }
 
-/** Genera la secuencia de 5 pedidos de una ronda (pizzas al azar con repeticion). */
-function generarPedidos(n = PEDIDOS_POR_RONDA) {
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const base = elige(PEDIDOS);
-    out.push({ nombre: base.nombre, ingredientes: base.ingredientes.slice() });
-  }
-  return out;
+/**
+ * Genera UN pedido al azar (sin repetir el anterior). Las rondas ahora duran un
+ * tiempo fijo y van pidiendo pedidos "bajo demanda" con esta funcion, por lo que
+ * la secuencia es distinta en cada partida y no se puede memorizar.
+ */
+function generarPedido(pedidoAnterior) {
+  return elegirPedidoAleatorio(pedidoAnterior);
 }
 
 // =========================================================================
@@ -200,6 +200,30 @@ class GameEngine {
   _limpiarTimers(sala) {
     for (const t of sala.timers) clearTimeout(t);
     sala.timers.clear();
+  }
+
+  /**
+   * Arranca el cronometro de cuenta regresiva de la ronda (10 min). Fija
+   * `ronda.inicio` y `ronda.finProgramado`, y programa la finalizacion
+   * automatica por TIEMPO (sin importar cuantos pedidos se completaron).
+   * Se llama en el momento en que la ronda empieza a jugarse de verdad
+   * (tras elegir cocinero en R1 / confirmar roles en R2 / al iniciar R3).
+   */
+  _arrancarCronometroRonda(sala) {
+    const r = sala.ronda;
+    if (!r) return;
+    r.inicio = ahora();
+    r.finProgramado = r.inicio + DURACION_RONDA_MS;
+    // Timer maestro: al agotarse el tiempo, se cierra la ronda con lo logrado.
+    this._timer(
+      sala,
+      () => {
+        if (sala.ronda === r && r.fase !== 'completada') {
+          this._finalizarRonda(sala);
+        }
+      },
+      DURACION_RONDA_MS
+    );
   }
 
   // ---- Ingreso / reconexion ---------------------------------------------
@@ -364,8 +388,10 @@ class GameEngine {
     sala.ronda = {
       tipo: 1,
       fase: 'elegir-cocinero', // los jugadores eligen 1 cocinero antes de arrancar
-      pedidos: generarPedidos(),
-      indice: 0,
+      // Pedido ACTUAL (se genera bajo demanda). La ronda dura por TIEMPO, no por
+      // cantidad: al completar un pedido se genera otro hasta que se agote el reloj.
+      pedido: null,
+      pedidoAnterior: null, // para no repetir el mismo pedido dos veces seguidas
       progreso: [], // ingredientes ya colocados del pedido actual
       cocineroId: null,
       bloqueado: false,
@@ -374,6 +400,7 @@ class GameEngine {
       // rearmamos en cada clic correcto para forzar re-lectura (reshuffle).
       grid: [],
       inicio: null, // se fija cuando arranca de verdad (tras elegir cocinero)
+      finProgramado: 0, // instante en que termina la ronda por tiempo
       fin: null,
       metricas: { completados: 0, bloqueos: 0 },
     };
@@ -381,11 +408,19 @@ class GameEngine {
     for (const j of conectados) j.rol = null;
   }
 
-  /** (Re)construye y baraja la cuadricula gigante de la Ronda 1 segun la receta. */
+  /** Genera el proximo pedido de la Ronda 1 (sin repetir el anterior) y su grid. */
+  _nuevoPedidoRonda1(sala) {
+    const r = sala.ronda;
+    r.pedido = generarPedido(r.pedidoAnterior);
+    r.pedidoAnterior = r.pedido.nombre;
+    r.progreso = [];
+    this._rebuildGridRonda1(sala);
+  }
+
+  /** (Re)construye y baraja la cuadricula gigante de la Ronda 1 segun la receta actual. */
   _rebuildGridRonda1(sala) {
     const r = sala.ronda;
-    const pedido = r.pedidos[r.indice];
-    r.grid = pedido ? gridRonda1(pedido.ingredientes) : [];
+    r.grid = r.pedido ? gridRonda1(r.pedido.ingredientes) : [];
   }
 
   /** Un jugador se postula/elige como cocinero (primera eleccion gana). */
@@ -402,8 +437,8 @@ class GameEngine {
 
     sala.ronda.cocineroId = objetivo;
     sala.ronda.fase = 'jugando';
-    sala.ronda.inicio = ahora();
-    this._rebuildGridRonda1(sala); // primera cuadricula al arrancar
+    this._nuevoPedidoRonda1(sala); // primer pedido + cuadricula
+    this._arrancarCronometroRonda(sala); // cuenta regresiva de 10 min
     for (const j of this.jugadoresConectados(sala)) {
       j.rol = j.id === objetivo ? 'Cocinero' : 'Observador';
     }
@@ -424,10 +459,11 @@ class GameEngine {
       tipo: 2,
       // Con 3 jugadores el reparto es automatico; con 2, hay pantalla previa.
       fase: tresJugadores ? 'jugando' : 'elegir-roles',
-      pedidos: generarPedidos(),
       // pizzas en proceso: cada una con su estado (indice de estacion) y progreso.
+      // Se generan bajo demanda (la ronda dura por tiempo, no por cantidad).
       pizzas: [],
-      siguientePedido: 0,
+      seqPizza: 0, // contador para ids unicos de pizza
+      pedidoAnterior: null, // para no repetir el mismo pedido dos veces seguidas
       // asignacion: estacionId -> playerId (quien es responsable)
       asignacion: {},
       // grids: cuadricula (reales + decoys, barajada) POR estacion. Cada estacion
@@ -436,7 +472,8 @@ class GameEngine {
       grids: {},
       // bloqueos por estacion: estacionId -> timestamp hasta
       bloqueos: {},
-      inicio: tresJugadores ? ahora() : null,
+      inicio: null, // lo fija _arrancarCronometroRonda cuando arranca de verdad
+      finProgramado: 0,
       fin: null,
       metricas: {
         completados: 0,
@@ -456,6 +493,7 @@ class GameEngine {
       });
       this._sincronizarRolesRonda2(sala);
       this._initGridsRonda2(sala); // cuadricula de decoys por estacion
+      this._arrancarCronometroRonda(sala); // cuenta regresiva de 10 min
       this._lanzarSiguientePizza(sala);
     }
     // Con 2 jugadores esperamos a que confirmen roles (confirmarRolesRonda2).
@@ -484,9 +522,9 @@ class GameEngine {
     }
     sala.ronda.asignacion = { ...asignacion };
     sala.ronda.fase = 'jugando';
-    sala.ronda.inicio = ahora();
     this._sincronizarRolesRonda2(sala);
     this._initGridsRonda2(sala); // cuadricula de decoys por estacion
+    this._arrancarCronometroRonda(sala); // cuenta regresiva de 10 min
     this._lanzarSiguientePizza(sala);
     this.onUpdate(sala.id);
     return { ok: true };
@@ -518,13 +556,17 @@ class GameEngine {
     if (est) sala.ronda.grids[estacionId] = gridEstacion(est.ingredientes);
   }
 
-  /** Mete la siguiente pizza pendiente al flujo (estado = primera estacion). */
+  /**
+   * Mete una NUEVA pizza al flujo (estado = primera estacion). El pedido se elige
+   * al azar sin repetir el anterior. Como la ronda dura por tiempo, no hay tope:
+   * siempre que se complete una pizza, entra otra hasta que se agote el reloj.
+   */
   _lanzarSiguientePizza(sala) {
     const r = sala.ronda;
-    if (r.siguientePedido >= r.pedidos.length) return;
-    const pedido = r.pedidos[r.siguientePedido];
+    const pedido = generarPedido(r.pedidoAnterior);
+    r.pedidoAnterior = pedido.nombre;
     r.pizzas.push({
-      id: `pz_${r.siguientePedido}`,
+      id: `pz_${r.seqPizza++}`,
       nombre: pedido.nombre,
       ingredientes: pedido.ingredientes.slice(),
       estacionIndice: 0, // indice dentro de ESTACIONES por el que va pasando
@@ -532,7 +574,6 @@ class GameEngine {
       progresoEstacion: [],
       completada: false,
     });
-    r.siguientePedido++;
   }
 
   // =======================================================================
@@ -545,22 +586,25 @@ class GameEngine {
   // decide volver a descansar o seguir activo.
   _iniciarRonda3(sala, conectados) {
     sala.estado = 'jugando';
-    // Secuencia de 5 pedidos: mezcla de normales (1 pizza) y hora pico (2-3).
-    const secuencia = this._generarSecuenciaRonda3();
     sala.ronda = {
       tipo: 3,
       fase: 'jugando',
-      secuencia, // array de rafagas; cada rafaga = { horaPico, pizzas:[...] }
-      rafagaIndice: 0,
+      // Las rafagas se generan BAJO DEMANDA (no una secuencia fija): cada nueva
+      // rafaga decide al azar si es normal o "¡HORA PICO!". La ronda dura por
+      // tiempo, asi que se generan rafagas indefinidamente hasta agotar el reloj.
+      seqRafaga: 0, // contador para ids unicos de pizza por rafaga
+      pedidoAnterior: null, // para no repetir el mismo pedido dos veces seguidas
       // estado por jugador: 'activo' | 'descansando' | 'coldstart'
       estados: {},
       coldHasta: {}, // playerId -> timestamp fin de cold start
       pizzasActivas: [], // pizzas visibles de la rafaga actual
+      horaPicoActual: false,
       // grids: cuadricula (reales + decoys, barajada) POR pizza activa. Misma
       // logica de decoys que la Ronda 2 (tamaño manejable 25-35), independiente
       // por cada pizza de la rafaga; se re-baraja al hacer un clic correcto.
       grids: {},
-      inicio: ahora(),
+      inicio: null, // lo fija _arrancarCronometroRonda
+      finProgramado: 0,
       fin: null,
       metricas: { completados: 0, coldStarts: 0, tiempoColdMs: 0 },
     };
@@ -569,38 +613,36 @@ class GameEngine {
       sala.ronda.estados[j.id] = i === 0 ? 'activo' : 'descansando';
       j.rol = i === 0 ? 'Activo' : 'Descansando';
     });
+    this._arrancarCronometroRonda(sala); // cuenta regresiva de 10 min
     this._cargarRafagaRonda3(sala);
   }
 
-  /** Genera 5 pedidos: cada uno normal (1 pizza) o hora pico (2-3 pizzas). */
-  _generarSecuenciaRonda3() {
-    const rafagas = [];
-    for (let i = 0; i < PEDIDOS_POR_RONDA; i++) {
-      const horaPico = Math.random() < 0.45; // ~45% de las veces
-      const cantidad = horaPico ? 2 + Math.floor(Math.random() * 2) : 1; // 2 o 3
-      const pizzas = [];
-      for (let k = 0; k < cantidad; k++) {
-        const base = elige(PEDIDOS);
-        pizzas.push({
-          id: `r${i}_${k}`,
-          nombre: base.nombre,
-          ingredientes: base.ingredientes.slice(),
-          progreso: [],
-          completada: false,
-        });
-      }
-      rafagas.push({ horaPico, pizzas });
-    }
-    return rafagas;
-  }
-
-  /** Carga la rafaga actual como pizzas activas y notifica hora pico si aplica. */
+  /**
+   * Genera y carga UNA nueva rafaga al azar como pizzas activas:
+   *  - Con probabilidad PROB_HORA_PICO (~28%) es "¡HORA PICO!" (2 o 3 pizzas).
+   *  - Si no, es un pedido normal (1 pizza).
+   * Cada pizza usa un pedido aleatorio sin repetir el anterior. Como es bajo
+   * demanda, la secuencia es distinta en cada partida (no memorizable).
+   */
   _cargarRafagaRonda3(sala) {
     const r = sala.ronda;
-    if (r.rafagaIndice >= r.secuencia.length) return;
-    const rafaga = r.secuencia[r.rafagaIndice];
-    r.pizzasActivas = rafaga.pizzas.map((p) => ({ ...p, progreso: [], completada: false }));
-    r.horaPicoActual = rafaga.horaPico;
+    const horaPico = Math.random() < PROB_HORA_PICO;
+    const cantidad = horaPico ? 2 + Math.floor(Math.random() * 2) : 1; // 2 o 3 en pico
+    const pizzas = [];
+    for (let k = 0; k < cantidad; k++) {
+      const pedido = generarPedido(r.pedidoAnterior);
+      r.pedidoAnterior = pedido.nombre;
+      pizzas.push({
+        id: `r${r.seqRafaga}_${k}`,
+        nombre: pedido.nombre,
+        ingredientes: pedido.ingredientes.slice(),
+        progreso: [],
+        completada: false,
+      });
+    }
+    r.seqRafaga++;
+    r.pizzasActivas = pizzas;
+    r.horaPicoActual = horaPico;
     // Cuadricula de decoys por cada pizza visible de la rafaga (ya barajada).
     r.grids = {};
     for (const p of r.pizzasActivas) r.grids[p.id] = gridPizza(p.ingredientes);
@@ -681,7 +723,7 @@ class GameEngine {
     if (playerId !== r.cocineroId) return; // solo el cocinero
     if (r.bloqueado && ahora() < r.bloqueoHasta) return; // en bloqueo
 
-    const pedido = r.pedidos[r.indice];
+    const pedido = r.pedido;
     if (!pedido) return;
     const esperado = pedido.ingredientes[r.progreso.length];
     // VALIDACION ANTI-DECOY: solo el string EXACTO del ingrediente real esperado
@@ -695,16 +737,11 @@ class GameEngine {
     this._rebuildGridRonda1(sala);
 
     if (r.progreso.length === pedido.ingredientes.length) {
-      // Pizza completada.
+      // Pizza completada. La ronda NO termina aqui: dura por tiempo, asi que
+      // generamos otro pedido y seguimos hasta que el cronometro llegue a 0.
       r.metricas.completados++;
-      r.progreso = [];
-      r.indice++;
-
-      if (r.indice >= r.pedidos.length) {
-        return this._finalizarRonda(sala);
-      }
-      // Nueva receta -> nueva cuadricula (con sus propios decoys), ya barajada.
-      this._rebuildGridRonda1(sala);
+      // Nuevo pedido (sin repetir el anterior) + nueva cuadricula ya barajada.
+      this._nuevoPedidoRonda1(sala);
       // Tira el dado: 1 o 2 -> bloqueo de 20s (el monolito entero se detiene).
       if (dado() <= 2) {
         r.bloqueado = true;
@@ -802,14 +839,9 @@ class GameEngine {
         );
       }
 
-      // Mete otra pizza al flujo si quedan pendientes.
-      if (r.siguientePedido < r.pedidos.length) {
-        this._lanzarSiguientePizza(sala);
-      }
-
-      if (r.metricas.completados >= r.pedidos.length) {
-        this._finalizarRonda(sala);
-      }
+      // La ronda dura por tiempo: por cada pizza terminada entra otra nueva.
+      // (El fin de la ronda lo dispara el cronometro maestro, no un contador.)
+      this._lanzarSiguientePizza(sala);
     }
   }
 
@@ -836,13 +868,10 @@ class GameEngine {
     // La rafaga se completa cuando TODAS sus pizzas estan listas.
     if (r.pizzasActivas.every((p) => p.completada)) {
       r.metricas.completados++; // cada rafaga cuenta como 1 "pedido" completado
-      r.rafagaIndice++;
-
-      if (r.rafagaIndice >= r.secuencia.length) {
-        return this._finalizarRonda(sala);
-      }
-      // Cargar la siguiente rafaga. Los que esten en 'activo' siguen activos
-      // (NO repiten cold start); los que descansan veran la notificacion si es pico.
+      // La ronda dura por tiempo: al terminar una rafaga se genera otra nueva
+      // (normal o pico, al azar) hasta que el cronometro llegue a 0. Los que esten
+      // 'activo' siguen activos (NO repiten cold start); los que descansan veran
+      // la notificacion si la nueva rafaga es de hora pico.
       this._cargarRafagaRonda3(sala);
     }
     this.onUpdate(sala.id);
@@ -881,19 +910,32 @@ class GameEngine {
     this.onUpdate(sala.id);
   }
 
-  /** Arma el objeto de resultados + narrativa segun el tipo de ronda. */
+  /**
+   * Arma el objeto de resultados + narrativa segun el tipo de ronda.
+   * Ahora la ronda dura un tiempo fijo (~10 min), asi que el dato clave para
+   * comparar entre rondas es CUANTOS pedidos se completaron en ese lapso
+   * (r.metricas.completados), ademas de fallas/esperas. El tiempo total se sigue
+   * reportando (sera ~10 min) para mantener consistente la tabla comparativa.
+   */
   _construirResumen(r, tiempoTotalMs) {
-    const seg = (tiempoTotalMs / 1000).toFixed(1);
+    // Texto de duracion legible: "10 min" en produccion; "Ns" si la ronda fue
+    // muy corta (p.ej. en pruebas con duracion reducida).
+    const duracion =
+      tiempoTotalMs >= 60000
+        ? `${Math.round(tiempoTotalMs / 60000)} min`
+        : `${Math.round(tiempoTotalMs / 1000)}s`;
+    const completados = r.metricas.completados;
     if (r.tipo === 1) {
       return {
         ronda: 1,
         titulo: 'Monolito',
         tiempoTotalMs,
+        completados,
         bloqueos: r.metricas.bloqueos,
         narrativa:
-          `El unico cocinero completo 5 pizzas en ${seg}s y quedo bloqueado ` +
-          `${r.metricas.bloqueos} vez/veces. Como en un monolito, cada bloqueo detuvo ` +
-          `TODA la produccion: no habia a quien delegar.`,
+          `En ${duracion} el unico cocinero completo ${completados} pizza(s) y quedo ` +
+          `bloqueado ${r.metricas.bloqueos} vez/veces. Como en un monolito, cada bloqueo ` +
+          `detuvo TODA la produccion: no habia a quien delegar.`,
       };
     }
     if (r.tipo === 2) {
@@ -905,23 +947,25 @@ class GameEngine {
         ronda: 2,
         titulo: 'Microservicios',
         tiempoTotalMs,
+        completados,
         fallas: r.metricas.fallas,
         tiempoRestoActivoMs: tiempoResto,
         narrativa:
-          `Las estaciones completaron 5 pizzas en ${seg}s con ${r.metricas.fallas} ` +
-          `falla(s). En cada falla solo se detuvo UNA estacion mientras las demas ` +
-          `siguieron trabajando: aislamiento de fallos, como en microservicios.`,
+          `En ${duracion} las estaciones completaron ${completados} pizza(s) con ` +
+          `${r.metricas.fallas} falla(s). En cada falla solo se detuvo UNA estacion ` +
+          `mientras las demas siguieron trabajando: aislamiento de fallos, como en microservicios.`,
       };
     }
     return {
       ronda: 3,
       titulo: 'Serverless',
       tiempoTotalMs,
+      completados,
       coldStarts: r.metricas.coldStarts,
       tiempoColdMs: r.metricas.tiempoColdMs,
       narrativa:
-        `Se atendieron 5 pedidos en ${seg}s con ${r.metricas.coldStarts} cold start(s), ` +
-        `perdiendo ${(r.metricas.tiempoColdMs / 1000).toFixed(0)}s en arranques. ` +
+        `En ${duracion} se atendieron ${completados} pedido(s) con ${r.metricas.coldStarts} ` +
+        `cold start(s), perdiendo ${(r.metricas.tiempoColdMs / 1000).toFixed(0)}s en arranques. ` +
         `Escalar bajo demanda ahorra recursos en reposo pero cada arranque cuesta tiempo.`,
     };
   }
@@ -972,6 +1016,12 @@ class GameEngine {
         jugadores: this.jugadoresConectados(sala).map((j) => ({ nombre: j.nombre, rol: j.rol })),
         resultados: sala.resultados,
         mostrarPreguntas: sala.mostrarPreguntas,
+        // Cuenta regresiva de la ronda en curso (0 si no hay ronda jugandose).
+        tiempoRestanteMs:
+          sala.estado === 'jugando' ? this._tiempoRestante(sala.ronda) : 0,
+        // Pedidos completados en la ronda en curso (para verlo en vivo).
+        completadosActual:
+          sala.estado === 'jugando' && sala.ronda ? sala.ronda.metricas.completados : 0,
       };
     }
     return { salas, preguntas: PREGUNTAS_DISCUSION };
@@ -990,20 +1040,28 @@ class GameEngine {
     return sala.estado;
   }
 
+  /** Milisegundos que faltan para que termine la ronda por tiempo (0 si no arrancó). */
+  _tiempoRestante(r) {
+    if (!r || !r.finProgramado) return 0;
+    return Math.max(0, r.finProgramado - ahora());
+  }
+
   /** Serializa la ronda en curso con lo necesario para pintar la UI. */
   _serializarRonda(sala) {
     const r = sala.ronda;
     if (!r) return null;
+    // tiempoRestanteMs alimenta el cronometro de cuenta regresiva del cliente.
+    const tiempoRestanteMs = this._tiempoRestante(r);
     if (r.tipo === 1) {
-      const pedido = r.pedidos[r.indice] || null;
       return {
         tipo: 1,
         fase: r.fase,
         cocineroId: r.cocineroId,
-        pedidoActual: pedido,
+        pedidoActual: r.pedido || null,
         progreso: r.progreso,
-        indice: r.indice,
-        total: r.pedidos.length,
+        // completados sustituye a "indice/total": ya no hay tope de pedidos.
+        completados: r.metricas.completados,
+        tiempoRestanteMs,
         bloqueado: r.bloqueado,
         bloqueoRestanteMs: r.bloqueado ? Math.max(0, r.bloqueoHasta - ahora()) : 0,
         // Cuadricula gigante (reales + decoys) ya barajada por el servidor.
@@ -1033,7 +1091,7 @@ class GameEngine {
         // Cuadricula (reales + decoys) barajada POR estacion.
         grids: r.grids || {},
         completados: r.metricas.completados,
-        total: r.pedidos.length,
+        tiempoRestanteMs,
         metricas: r.metricas,
       };
     }
@@ -1056,7 +1114,7 @@ class GameEngine {
         // Cuadricula (reales + decoys) barajada POR pizza activa.
         grids: r.grids || {},
         completados: r.metricas.completados,
-        total: r.secuencia.length,
+        tiempoRestanteMs,
         metricas: r.metricas,
       };
     }

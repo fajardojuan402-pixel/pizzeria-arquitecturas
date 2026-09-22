@@ -99,8 +99,38 @@ function render(s) {
     'En sala: ' + s.jugadores.map((j) => j.nombre + (j.rol ? ` (${j.rol})` : '')).join(', ');
 
   const c = $('#contenido');
-  c.innerHTML = '';
 
+  // BUG 2 — El <select> de la Ronda 2 (2 jugadores) se cerraba solo porque cada
+  // actualizacion de estado por WebSocket recreaba el nodo del selector mientras
+  // el usuario lo tenia abierto. Solucion: si ya estamos mostrando la pantalla de
+  // seleccion de roles y el nuevo estado sigue en esa misma fase, NO re-renderizamos
+  // (nada de esa pantalla cambia hasta que el jugador confirme). Asi el dropdown
+  // nativo permanece intacto y se puede elegir con calma.
+  const enSeleccionRoles =
+    s.estado === 'jugando' && s.ronda && s.ronda.tipo === 2 && s.ronda.fase === 'elegir-roles';
+  if (enSeleccionRoles && c.querySelector('[data-rolesr2]')) {
+    // Solo actualizamos la cabecera/cronometro; dejamos el selector como esta.
+    actualizarCabeceraTiempo(s);
+    return;
+  }
+
+  // BUG 1 — El scroll se "devolvia" al inicio en cada actualizacion porque
+  // reconstruimos todo el HTML (innerHTML = ''), y el navegador pierde la posicion.
+  // Solucion: guardamos el scrollTop de las listas largas ANTES de reconstruir y
+  // lo restauramos justo DESPUES. Usamos un id estable por lista para casarlas.
+  const scrollGuardado = guardarScrolls(c);
+  const scrollPagina = window.scrollY;
+
+  c.innerHTML = '';
+  construirContenido(s, c);
+
+  // Restauramos las posiciones de scroll tras reconstruir el DOM (BUG 1).
+  restaurarScrolls(c, scrollGuardado);
+  window.scrollTo(0, scrollPagina);
+}
+
+/** Construye el contenido de #contenido segun el estado (sin tocar el scroll). */
+function construirContenido(s, c) {
   // Preguntas de discusion (si el sistema/profesor las activo).
   if (s.mostrarPreguntas && s.preguntas.length) {
     c.appendChild(vistaPreguntas(s.preguntas));
@@ -134,6 +164,51 @@ function render(s) {
   else if (r.tipo === 3) c.appendChild(vistaRonda3(s, r));
 }
 
+// --- BUG 1: preservacion de scroll de listas largas ------------------------
+
+/**
+ * Recorre los contenedores con scroll dentro de `raiz` (las cuadriculas de
+ * ingredientes marcadas con data-scrollkey) y devuelve un mapa clave -> scrollTop.
+ */
+function guardarScrolls(raiz) {
+  const mapa = {};
+  raiz.querySelectorAll('[data-scrollkey]').forEach((nodo) => {
+    mapa[nodo.getAttribute('data-scrollkey')] = nodo.scrollTop;
+  });
+  return mapa;
+}
+
+/** Restaura el scrollTop guardado en los contenedores que reaparecen tras el re-render. */
+function restaurarScrolls(raiz, mapa) {
+  raiz.querySelectorAll('[data-scrollkey]').forEach((nodo) => {
+    const key = nodo.getAttribute('data-scrollkey');
+    if (mapa[key] != null) nodo.scrollTop = mapa[key];
+  });
+}
+
+/** Actualiza solo la cabecera con el cronometro (sin recrear el contenido). */
+function actualizarCabeceraTiempo(s) {
+  const cron = document.querySelector('[data-cronometro]');
+  if (cron && s.ronda) cron.textContent = '⏱ ' + formatoTiempo(s.ronda.tiempoRestanteMs);
+}
+
+/** Formatea milisegundos como mm:ss para la cuenta regresiva. */
+function formatoTiempo(ms) {
+  const total = Math.max(0, Math.ceil((ms || 0) / 1000));
+  const m = Math.floor(total / 60);
+  const seg = total % 60;
+  return `${m}:${String(seg).padStart(2, '0')}`;
+}
+
+/** Crea el bloque del cronometro de cuenta regresiva de la ronda. */
+function cronometro(r) {
+  const restante = r.tiempoRestanteMs || 0;
+  const cls = restante <= 30000 ? 'rojo' : restante <= 120000 ? 'amarillo' : 'azul';
+  const span = pill('⏱ ' + formatoTiempo(restante), cls);
+  span.setAttribute('data-cronometro', '1');
+  return span;
+}
+
 function bloqueEspera(texto) {
   const d = el('div', 'card espera');
   d.appendChild(el('div', 'big', '⏳'));
@@ -162,8 +237,12 @@ function vistaRonda1(s, r) {
   }
 
   const soyCocinero = s.yo && s.yo.id === r.cocineroId;
-  card.appendChild(pill(soyCocinero ? 'Eres el COCINERO' : 'Observando', soyCocinero ? 'verde' : 'gris'));
-  card.appendChild(el('div', 'mini', `Pedido ${Math.min(r.indice + 1, r.total)} de ${r.total} · bloqueos: ${r.metricas.bloqueos}`));
+  const cab = el('div', 'row');
+  cab.appendChild(pill(soyCocinero ? 'Eres el COCINERO' : 'Observando', soyCocinero ? 'verde' : 'gris'));
+  cab.appendChild(cronometro(r));
+  card.appendChild(cab);
+  // La ronda dura por tiempo: mostramos pedidos completados (no "X de 5").
+  card.appendChild(el('div', 'mini', `Pizzas completadas: ${r.completados} · bloqueos: ${r.metricas.bloqueos}`));
 
   // Bloqueo activo (todo el monolito detenido).
   if (r.bloqueado) {
@@ -190,9 +269,13 @@ function vistaRonda1(s, r) {
       el('div', 'mini', `🔎 Busca el ingrediente correcto entre ${r.grid.length} opciones parecidas`)
     );
     card.appendChild(
-      panelIngredientes(r.grid, siguiente, (ing) => {
-        sock.emit('colocar-ingrediente', { ingrediente: ing });
-      })
+      panelIngredientes(
+        r.grid,
+        siguiente,
+        (ing) => sock.emit('colocar-ingrediente', { ingrediente: ing }),
+        false,
+        'r1-grid' // clave de scroll estable (una sola cuadricula en R1)
+      )
     );
   } else {
     card.appendChild(el('p', 'mini', 'Solo el cocinero puede colocar ingredientes.'));
@@ -217,7 +300,11 @@ function vistaRonda2(s, r) {
     .filter((e) => r.asignacion[e.id] === (s.yo && s.yo.id))
     .map((e) => e.id);
 
-  card.appendChild(el('div', 'mini', `Completadas: ${r.completados}/${r.total} · fallas: ${r.metricas.fallas}`));
+  const cab2 = el('div', 'row');
+  cab2.appendChild(cronometro(r));
+  cab2.appendChild(pill(`Completadas: ${r.completados}`, 'gris'));
+  cab2.appendChild(pill(`Fallas: ${r.metricas.fallas}`, r.metricas.fallas ? 'rojo' : 'gris'));
+  card.appendChild(cab2);
 
   // Estado de cada estacion (activa / bloqueada).
   const estRow = el('div', 'row');
@@ -251,9 +338,13 @@ function vistaRonda2(s, r) {
       // arma/baraja el servidor en r.grids[est.id]; misma para todas sus pizzas.
       const grid = (r.grids && r.grids[est.id]) || requeridosAqui;
       box.appendChild(
-        panelIngredientes(grid, siguiente, (ing) => {
-          sock.emit('colocar-ingrediente', { pizzaId: p.id, ingrediente: ing });
-        })
+        panelIngredientes(
+          grid,
+          siguiente,
+          (ing) => sock.emit('colocar-ingrediente', { pizzaId: p.id, ingrediente: ing }),
+          false,
+          'r2-' + p.id + '-' + est.id // clave por pizza+estacion
+        )
       );
     } else if (puedo && !requeridosAqui.length) {
       const b = el('button', 'ghost', 'Pasar a siguiente estacion');
@@ -271,6 +362,9 @@ function vistaRonda2(s, r) {
 /** Pantalla de seleccion de roles (solo cuando hay 2 jugadores). */
 function seleccionRolesR2(s, r) {
   const box = el('div');
+  // Marca que permite al render saltarse el re-render mientras el usuario
+  // interactua con los <select> (evita que un update por WebSocket los cierre).
+  box.setAttribute('data-rolesr2', '1');
   box.appendChild(
     el('p', null, 'Son 2 jugadores: uno cubrira DOS estaciones y el otro UNA. Asignen cada estacion:')
   );
@@ -313,7 +407,11 @@ function seleccionRolesR2(s, r) {
 function vistaRonda3(s, r) {
   const card = el('div', 'card');
   card.appendChild(el('h2', null, 'Ronda 3 — Fin de semana, bajo demanda (Serverless)'));
-  card.appendChild(el('div', 'mini', `Pedidos: ${r.completados}/${r.total} · cold starts: ${r.metricas.coldStarts}`));
+  const cab3 = el('div', 'row');
+  cab3.appendChild(cronometro(r));
+  cab3.appendChild(pill(`Pedidos: ${r.completados}`, 'gris'));
+  cab3.appendChild(pill(`Cold starts: ${r.metricas.coldStarts}`, r.metricas.coldStarts ? 'amarillo' : 'gris'));
+  card.appendChild(cab3);
 
   const miEstado = r.estados[s.yo && s.yo.id];
   const coldRestante = r.coldRestante[s.yo && s.yo.id] || 0;
@@ -370,7 +468,8 @@ function vistaRonda3(s, r) {
           grid,
           siguiente,
           (ing) => sock.emit('colocar-ingrediente', { pizzaId: p.id, ingrediente: ing }),
-          bloqueadaCuadricula // deshabilitada si no estoy activo (cold start/descanso)
+          bloqueadaCuadricula, // deshabilitada si no estoy activo (cold start/descanso)
+          'r3-' + p.id // clave de scroll por pizza
         )
       );
     }
@@ -417,8 +516,10 @@ function recetaProgreso(ingredientes, progreso) {
  * IMPORTANTE: NO reordenamos ni deduplicamos aqui — respetamos el orden revuelto
  * que mando el servidor (mezcla de familias distintas, sin agrupar por tipo).
  */
-function panelIngredientes(grid, siguiente, onClick, disabled) {
+function panelIngredientes(grid, siguiente, onClick, disabled, scrollKey) {
   const cont = el('div', 'ingredientes' + (disabled ? ' bloqueada' : ''));
+  // Clave estable para preservar la posicion de scroll entre re-renders (BUG 1).
+  if (scrollKey) cont.setAttribute('data-scrollkey', scrollKey);
   grid.forEach((ing) => {
     const esCorrecto = ing === siguiente;
     // No marcamos con clase 'next' el correcto: delataria la respuesta. La
@@ -462,9 +563,11 @@ function barra(fraccion) {
 function vistaResultado(res) {
   const card = el('div', 'card');
   card.appendChild(el('h2', null, `Resultado — Ronda ${res.ronda}: ${res.titulo}`));
-  const seg = (res.tiempoTotalMs / 1000).toFixed(1);
   const ul = el('div', 'row');
-  ul.appendChild(pill(`Tiempo: ${seg}s`, 'azul'));
+  // La ronda dura por tiempo (~10 min); el dato interesante es cuantos pedidos
+  // se completaron. Mostramos tiempo en min:seg + pedidos completados.
+  ul.appendChild(pill(`Tiempo: ${formatoTiempo(res.tiempoTotalMs)}`, 'azul'));
+  if (res.completados != null) ul.appendChild(pill(`Pedidos: ${res.completados}`, 'verde'));
   if (res.ronda === 1) ul.appendChild(pill(`Bloqueos: ${res.bloqueos}`, 'rojo'));
   if (res.ronda === 2) {
     ul.appendChild(pill(`Fallas: ${res.fallas}`, 'rojo'));

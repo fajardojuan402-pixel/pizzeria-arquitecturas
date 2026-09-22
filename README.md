@@ -101,10 +101,21 @@ sale con código 0 si todo pasa. Útil para re-validar tras cualquier ajuste.
   dos estaciones y quién una, antes de arrancar el cronómetro. Menos
   "instancias" = más carga por servicio (parte de la discusión final).
 
+### Duración de las rondas (por tiempo)
+- Cada ronda dura un **tiempo fijo de 10 minutos** (no una cantidad de pedidos).
+  Al iniciarla arranca una **cuenta regresiva** visible para jugadores y profesor;
+  al llegar a **0:00** la ronda termina automáticamente con lo que se alcanzó a
+  completar. Mientras haya tiempo, se generan **pedidos indefinidamente**.
+- Los pedidos salen en **orden aleatorio** en cada partida (sin repetir el mismo
+  dos veces seguidas), así que la secuencia no se puede memorizar. En la Ronda 3,
+  cada nuevo pedido decide al azar si es normal o **¡HORA PICO!** (~28 %).
+- La duración es ajustable con la variable de entorno `PIZZA_DURACION_RONDA_MS`
+  (útil para pruebas: `PIZZA_DURACION_RONDA_MS=5000 npm start`).
+
 ### Mecánicas por ronda
 - **Ronda 1 (monolito):** eligen 1 cocinero; al completar cada pizza el
   servidor tira un dado (1–6). Si sale **1 o 2**, el cocinero se **bloquea 20 s**
-  (todo el "monolito" se detiene). Termina a las **5 pizzas**.
+  (todo el "monolito" se detiene). Nuevos pedidos hasta que se agote el tiempo.
 - **Ronda 2 (microservicios):** las pizzas fluyen por estaciones en paralelo.
   Tras cada pizza, si el dado saca 1 o 2 se **bloquea una estación al azar 20 s**;
   las demás siguen. Mide fallas y cuánto siguió activo el resto.
@@ -119,8 +130,10 @@ sale con código 0 si todo pasa. Útil para re-validar tras cualquier ajuste.
   en **menos de 1 minuto**, recupera su rol y estado en la partida.
 
 ### Resultados
-- Al terminar cada ronda se muestra de inmediato: tiempo total, fallas/esperas
-  y un **resumen narrativo** generado por el sistema.
+- Al terminar cada ronda (por tiempo) se muestra de inmediato: tiempo total
+  (~10 min), **pedidos completados** en ese lapso, fallas/esperas y un
+  **resumen narrativo** generado por el sistema. La tabla comparativa del
+  profesor incluye la columna de **pedidos completados** para comparar rondas.
 
 ## Notas para ajustar la actividad
 
