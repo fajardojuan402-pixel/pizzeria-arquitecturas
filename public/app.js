@@ -25,6 +25,51 @@ const el = (tag, cls, txt) => {
   return n;
 };
 
+/**
+ * Emite un evento con "anti-rebote" para acciones de una sola vez (elegir
+ * cocinero, confirmar roles): ignora repeticiones de la MISMA accion dentro de
+ * una ventana corta, para que clics rapidos/dobles no la disparen varias veces.
+ * NO se usa para colocar ingredientes (ahi los clics rapidos son parte del juego
+ * y el servidor valida cada uno). El backend sigue siendo autoritativo.
+ */
+const _ultimoEmit = {};
+function emitThrottled(event, data, clave, ventanaMs = 700) {
+  const k = clave || event + ':' + JSON.stringify(data || {});
+  const t = Date.now();
+  if (_ultimoEmit[k] && t - _ultimoEmit[k] < ventanaMs) return false;
+  _ultimoEmit[k] = t;
+  sock.emit(event, data);
+  return true;
+}
+
+/**
+ * Nombres de PRESENTACION de los ingredientes.
+ *
+ * El servidor y la validacion usan identificadores SIN tildes/ñ ("Pina",
+ * "Champinones", "Maiz", "Pimenton") para evitar problemas de codificacion y
+ * de coincidencia exacta. Pero al MOSTRARLOS en pantalla queremos la ortografia
+ * correcta. `mostrar()` traduce solo el texto visible; el valor que se envia al
+ * servidor sigue siendo el identificador original.
+ *
+ * Solo reemplaza palabras completas (con limites de palabra) para que tambien
+ * corrija los nombres compuestos de las pizzas (p. ej. "Pizza de Pina y
+ * Champinones" -> "Pizza de Piña y Champiñones").
+ */
+const NOMBRES_MOSTRAR = {
+  Pina: 'Piña',
+  Champinones: 'Champiñones',
+  Maiz: 'Maíz',
+  Pimenton: 'Pimentón',
+};
+function mostrar(texto) {
+  if (texto == null) return texto;
+  let salida = String(texto);
+  for (const [id, bonito] of Object.entries(NOMBRES_MOSTRAR)) {
+    salida = salida.replace(new RegExp('\\b' + id + '\\b', 'g'), bonito);
+  }
+  return salida;
+}
+
 function toast(msg) {
   const t = $('#toast');
   t.textContent = msg;
@@ -229,7 +274,13 @@ function vistaRonda1(s, r) {
     const row = el('div', 'row');
     s.jugadores.forEach((j) => {
       const b = el('button', 'ghost', `Que cocine ${j.nombre}`);
-      b.onclick = () => sock.emit('elegir-cocinero', { playerId: j.id });
+      b.onclick = () => {
+        // Anti-doble-clic: una sola eleccion de cocinero por ventana corta. El
+        // servidor ademas ignora la eleccion si la fase ya no es 'elegir-cocinero'.
+        if (emitThrottled('elegir-cocinero', { playerId: j.id }, 'cocinero')) {
+          row.querySelectorAll('button').forEach((btn) => (btn.disabled = true));
+        }
+      };
       row.appendChild(b);
     });
     card.appendChild(row);
@@ -258,7 +309,7 @@ function vistaRonda1(s, r) {
     return card;
   }
 
-  card.appendChild(el('h3', null, `Pedido: ${pedido.nombre}`));
+  card.appendChild(el('h3', null, `Pedido: ${mostrar(pedido.nombre)}`));
   card.appendChild(recetaProgreso(pedido.ingredientes, r.progreso));
 
   if (soyCocinero) {
@@ -324,8 +375,10 @@ function vistaRonda2(s, r) {
   r.pizzas.forEach((p) => {
     const est = r.estaciones.find((e) => e.id === p.estacionActual);
     const box = el('div', 'pizza');
-    box.appendChild(el('h3', null, p.nombre));
-    box.appendChild(el('div', 'estado', `En estacion: ${est ? est.nombre : '—'}`));
+    // El TITULO de la tarjeta es la estacion actual (el "microservicio" que la
+    // trabaja ahora); debajo se muestra que pizza es.
+    box.appendChild(el('h3', null, `Estacion: ${est ? est.nombre : '—'}`));
+    box.appendChild(el('div', 'estado', mostrar(p.nombre)));
 
     // Ingredientes que corresponden a la estacion actual.
     const requeridosAqui = est ? p.ingredientes.filter((ing) => est.ingredientes.includes(ing)) : [];
@@ -396,7 +449,11 @@ function seleccionRolesR2(s, r) {
       toast('Ambos jugadores deben cubrir al menos una estacion.');
       return;
     }
-    sock.emit('confirmar-roles-r2', { asignacion });
+    // Anti-doble-clic: una sola confirmacion por ventana corta. El servidor
+    // ademas rechaza confirmar si la fase ya no es 'elegir-roles'.
+    if (emitThrottled('confirmar-roles-r2', { asignacion }, 'roles-r2')) {
+      b.disabled = true;
+    }
   };
   box.appendChild(b);
   return box;
@@ -416,36 +473,40 @@ function vistaRonda3(s, r) {
   const miEstado = r.estados[s.yo && s.yo.id];
   const coldRestante = r.coldRestante[s.yo && s.yo.id] || 0;
 
-  // Cabecera de estado + hora pico.
+  // Cabecera de estado + hora pico. Durante la hora pico hay 2-3 pedidos a la
+  // vez: hacen falta tantos jugadores activos como pedidos. Lo mostramos claro
+  // para que los que descansan sepan que deben despertar y ayudar.
   if (r.horaPico) {
-    card.appendChild(el('div', 'aviso-bloqueo', '🔥 ¡HORA PICO! Varias pizzas a la vez.'));
+    const n = r.pizzas.length;
+    card.appendChild(
+      el(
+        'div',
+        'aviso-bloqueo',
+        `🔥 ¡HORA PICO! ${n} pedidos a la vez — el sistema activo automaticamente ${n} cocineros (cada uno paga su cold start).`
+      )
+    );
   }
 
-  // Panel de control de disponibilidad del jugador.
+  // Estado del jugador: es AUTOMATICO (escalado serverless). El estudiante ya no
+  // decide despertar ni descansar; el sistema lo hace segun la hora pico:
+  //   descansando -> 💤 Dormido (sin costo)  — se activara solo si llega hora pico
+  //   coldstart   -> 🥶 Arrancando… (cold start, Ns restantes) — arranque automatico
+  //   activo      -> 🔥 Caliente (listo, sin demora)
   const control = el('div', 'row');
   if (miEstado === 'coldstart') {
     const seg = Math.ceil(coldRestante / 1000);
     const b = el('div', 'card');
     b.style.width = '100%';
-    b.appendChild(el('div', null, `❄️ Cold start… listo en ${seg}s`));
+    b.appendChild(el('div', null, `🥶 Arrancando… (cold start automatico, ${seg}s restantes)`));
     b.appendChild(barra(1 - coldRestante / 10000));
     card.appendChild(b);
   } else if (miEstado === 'descansando') {
-    if (r.horaPico) {
-      const b = el('button', 'verde', 'Entrar a ayudar');
-      b.onclick = () => sock.emit('entrar-a-ayudar');
-      control.appendChild(b);
-      control.appendChild(pill('Estas descansando', 'gris'));
-    } else {
-      control.appendChild(pill('Descansando (instancia apagada)', 'gris'));
-    }
+    control.appendChild(pill('💤 Dormido (sin costo)', 'gris'));
+    control.appendChild(pill('Se activara solo cuando el profesor lance una hora pico', 'gris'));
     card.appendChild(control);
   } else {
     // activo
-    control.appendChild(pill('Activo', 'verde'));
-    const b = el('button', 'ghost', 'Volver a descansar');
-    b.onclick = () => sock.emit('cambiar-disponibilidad', { quiereDescansar: true });
-    control.appendChild(b);
+    control.appendChild(pill('🔥 Caliente (listo, sin demora)', 'verde'));
     card.appendChild(control);
   }
 
@@ -457,7 +518,7 @@ function vistaRonda3(s, r) {
   const cont = el('div', 'pizzas' + (bloqueadaCuadricula ? ' descansando' : ''));
   r.pizzas.forEach((p) => {
     const box = el('div', 'pizza');
-    box.appendChild(el('h3', null, p.nombre + (p.completada ? ' ✅' : '')));
+    box.appendChild(el('h3', null, mostrar(p.nombre) + (p.completada ? ' ✅' : '')));
     box.appendChild(recetaProgreso(p.ingredientes, p.progreso));
     if (!p.completada) {
       const siguiente = p.ingredientes[p.progreso.length];
@@ -490,7 +551,7 @@ function recetaProgreso(ingredientes, progreso) {
   const d = el('div', 'receta');
   ingredientes.forEach((ing, i) => {
     const hecho = i < progreso.length;
-    d.appendChild(el('span', 'ing' + (hecho ? ' hecho' : ''), ing));
+    d.appendChild(el('span', 'ing' + (hecho ? ' hecho' : ''), mostrar(ing)));
   });
   return d;
 }
@@ -523,8 +584,9 @@ function panelIngredientes(grid, siguiente, onClick, disabled, scrollKey) {
   grid.forEach((ing) => {
     const esCorrecto = ing === siguiente;
     // No marcamos con clase 'next' el correcto: delataria la respuesta. La
-    // dificultad es justamente encontrarlo leyendo.
-    const b = el('button', 'casilla', ing);
+    // dificultad es justamente encontrarlo leyendo. Mostramos el nombre con
+    // ortografia correcta (mostrar) pero al hacer clic enviamos el id crudo.
+    const b = el('button', 'casilla', mostrar(ing));
     if (disabled) {
       b.disabled = true;
     } else {
@@ -578,6 +640,20 @@ function vistaResultado(res) {
     ul.appendChild(pill(`Perdido en arranques: ${(res.tiempoColdMs / 1000).toFixed(0)}s`, 'rojo'));
   }
   card.appendChild(ul);
+
+  // Ronda 3: desglose por jugador del % de tiempo dormido vs. activo. Refuerza
+  // que "serverless" ahorra recursos durmiendo instancias cuando no hay carga.
+  if (res.ronda === 3 && res.tiempoPorJugador && res.tiempoPorJugador.length) {
+    const detalle = el('div', 'row');
+    detalle.style.marginTop = '8px';
+    res.tiempoPorJugador.forEach((t) => {
+      detalle.appendChild(
+        pill(`${t.nombre}: 💤 ${t.pctDormido}% dormido · 🔥 ${t.pctActivo}% activo`, 'gris')
+      );
+    });
+    card.appendChild(detalle);
+  }
+
   card.appendChild(el('div', 'narrativa', res.narrativa));
   return card;
 }

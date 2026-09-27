@@ -18,6 +18,22 @@ const el = (tag, cls, txt) => {
   return n;
 };
 
+/**
+ * Emite un evento con "anti-rebote": ignora repeticiones de la MISMA accion
+ * (misma clave) dentro de una ventana corta. Evita que clics rapidos o dobles
+ * disparen la accion varias veces. El backend igual valida (es autoritativo);
+ * esto solo reduce trafico y evita estados visuales raros.
+ */
+const _ultimoEmit = {};
+function emitThrottled(event, data, clave, ventanaMs = 700) {
+  const k = clave || event + ':' + JSON.stringify(data || {});
+  const t = Date.now();
+  if (_ultimoEmit[k] && t - _ultimoEmit[k] < ventanaMs) return false;
+  _ultimoEmit[k] = t;
+  sock.emit(event, data);
+  return true;
+}
+
 function toast(msg) {
   const t = $('#toast');
   t.textContent = msg;
@@ -144,18 +160,62 @@ function tarjetaSala(sala) {
     b.title = puede ? '' : 'Se necesitan al menos 2 jugadores';
     b.onclick = () => {
       const evento = yaJugada ? 'reiniciar-ronda' : 'iniciar-ronda';
-      sock.emit(evento, { salaId: sala.id, numero: n });
+      // Anti-doble-clic: bloquea repetir iniciar/reiniciar de ESA ronda un momento.
+      if (emitThrottled(evento, { salaId: sala.id, numero: n }, `${evento}:${sala.id}:${n}`)) {
+        b.disabled = true; // feedback inmediato hasta el proximo re-render
+      }
     };
     filaIniciar.appendChild(b);
   });
   card.appendChild(filaIniciar);
+
+  // Ronda 3: control de HORA PICO (solo el profesor la dispara). Llegan 2-3
+  // pedidos a la vez y los jugadores despiertan automaticamente para cubrirlos.
+  // Se pueden ENCOLAR varias: se ejecutan una tras otra cuando termina la actual.
+  if (sala.esRonda3) {
+    const filaPico = el('div', 'row');
+    filaPico.style.marginTop = '8px';
+    const enCola = (sala.picosPendientes && sala.picosPendientes.length) || 0;
+    const bpico = el(
+      'button',
+      sala.horaPicoActiva ? 'amarillo' : 'rojo',
+      sala.horaPicoActiva ? '🔥 Encolar otra hora pico' : '🔥 Activar hora pico'
+    );
+    // Siempre habilitado: si ya hay una en curso, la nueva queda pendiente en cola.
+    bpico.title = sala.horaPicoActiva
+      ? 'Ya hay una hora pico en curso; esta quedara pendiente y se ejecutara cuando termine la actual.'
+      : 'Genera 2-3 pedidos a la vez; el sistema despierta a los cocineros necesarios.';
+    bpico.onclick = () => {
+      // Anti-doble-clic: un solo evento de hora pico por ventana corta. Encolar
+      // varias es intencional, pero debe ser un clic deliberado, no un rebote.
+      if (emitThrottled('activar-hora-pico', { salaId: sala.id }, 'pico:' + sala.id)) {
+        bpico.disabled = true; // feedback inmediato hasta el proximo re-render
+      }
+    };
+    filaPico.appendChild(bpico);
+
+    // Estado en vivo de la hora pico y de la cola de pendientes.
+    if (sala.horaPicoActiva) {
+      filaPico.appendChild(el('span', 'pill amarillo', `En curso: ${sala.pedidosActivos} pendiente(s)`));
+    }
+    if (enCola > 0) {
+      filaPico.appendChild(
+        el('span', 'pill gris', `En cola: ${enCola} hora(s) pico [${sala.picosPendientes.join(', ')}]`)
+      );
+    }
+    card.appendChild(filaPico);
+  }
 
   // Boton de preguntas de discusion.
   const filaExtra = el('div', 'row');
   filaExtra.style.marginTop = '8px';
   const bp = el('button', 'ghost', sala.mostrarPreguntas ? 'Preguntas visibles ✓' : 'Mostrar preguntas de discusion');
   bp.disabled = sala.mostrarPreguntas;
-  bp.onclick = () => sock.emit('mostrar-preguntas', { salaId: sala.id });
+  bp.onclick = () => {
+    if (emitThrottled('mostrar-preguntas', { salaId: sala.id }, 'preg:' + sala.id)) {
+      bp.disabled = true;
+    }
+  };
   filaExtra.appendChild(bp);
   card.appendChild(filaExtra);
 
@@ -182,8 +242,8 @@ function renderTabla(salas) {
   const tabla = el('table');
 
   const thead = el('tr');
-  ['Sala', 'Ronda', 'Arquitectura', 'Tiempo', 'Pedidos', 'Fallas/Bloqueos', 'Extra'].forEach((h) =>
-    thead.appendChild(el('th', null, h))
+  ['Sala', 'Ronda', 'Arquitectura', 'Tiempo', 'Pedidos', 'Tiempo perdido', 'Fallas/Bloqueos', 'Extra'].forEach(
+    (h) => thead.appendChild(el('th', null, h))
   );
   tabla.appendChild(thead);
 
@@ -202,6 +262,17 @@ function renderTabla(salas) {
       tr.appendChild(el('td', null, formatoTiempo(r.tiempoTotalMs)));
       // Pedidos completados en ese lapso: el dato clave para comparar rondas.
       tr.appendChild(el('td', null, String(r.completados != null ? r.completados : '—')));
+
+      // Tiempo perdido por fallas/bloqueos/cold starts (segundos). Permite comparar
+      // con numeros concretos cuanta produccion "se congelo" en cada arquitectura:
+      //   R1 monolito     -> todo detenido en cada bloqueo (tiempoBloqueoMs)
+      //   R2 microservicios -> solo una estacion bloqueada por vez (tiempoRestoActivoMs)
+      //   R3 serverless   -> tiempo perdido en arranques / cold starts (tiempoColdMs)
+      let perdidoMs = 0;
+      if (r.ronda === 1) perdidoMs = r.tiempoBloqueoMs || 0;
+      else if (r.ronda === 2) perdidoMs = r.tiempoRestoActivoMs || 0;
+      else if (r.ronda === 3) perdidoMs = r.tiempoColdMs || 0;
+      tr.appendChild(el('td', null, `${(perdidoMs / 1000).toFixed(0)}s`));
 
       let fallas = '—';
       if (r.ronda === 1) fallas = `${r.bloqueos} bloqueo(s)`;

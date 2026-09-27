@@ -9,18 +9,34 @@
 
 // Ingredientes disponibles (el orden es el que se muestra en pantalla).
 const INGREDIENTES = [
+  // Masa (bases y salsas) — la estacion "Masa" ahora tiene variedad real.
   'Base',
+  'Base integral',
   'Salsa',
+  'Salsa blanca',
+  // Quesos — la estacion "Quesos" tambien tiene variedad real.
   'Queso',
+  'Queso mozzarella',
+  'Queso cheddar',
+  // Toppings.
   'Pepperoni',
   'Jamon',
   'Pina',
   'Champinones',
   'Aceitunas',
   'Cebolla',
+  'Tocineta',
+  'Maiz',
+  'Pimenton',
+  'Tomate',
+  'Carne',
+  'Pollo',
 ];
 
-// Catalogo de pedidos posibles: nombre + ingredientes requeridos (en orden).
+// Catalogo de pedidos de EJEMPLO (recetas "clasicas"). Historicamente los
+// pedidos salian de aqui, pero ahora cada pizza se ARMA AL AZAR combinando
+// cualquiera de los ingredientes disponibles (ver elegirPedidoAleatorio). Se
+// conserva como referencia/documentacion y por compatibilidad de imports.
 const PEDIDOS = [
   { nombre: 'Margarita', ingredientes: ['Base', 'Salsa', 'Queso'] },
   { nombre: 'Hawaiana', ingredientes: ['Base', 'Salsa', 'Queso', 'Pina', 'Jamon'] },
@@ -30,24 +46,59 @@ const PEDIDOS = [
     ingredientes: ['Base', 'Salsa', 'Queso', 'Champinones', 'Aceitunas', 'Cebolla'],
   },
   { nombre: 'Especial', ingredientes: ['Base', 'Salsa', 'Queso', 'Pepperoni', 'Cebolla'] },
+  {
+    nombre: 'Mexicana',
+    ingredientes: ['Base', 'Salsa', 'Queso', 'Carne', 'Maiz', 'Pimenton'],
+  },
+  {
+    nombre: 'Barbacoa',
+    ingredientes: ['Base', 'Salsa', 'Queso', 'Pollo', 'Cebolla', 'Tocineta'],
+  },
+  {
+    nombre: 'Campesina',
+    ingredientes: ['Base', 'Salsa', 'Queso', 'Tocineta', 'Maiz', 'Champinones'],
+  },
+  {
+    nombre: 'Mediterranea',
+    ingredientes: ['Base', 'Salsa', 'Queso', 'Tomate', 'Aceitunas', 'Cebolla'],
+  },
+  {
+    nombre: 'Carnivora',
+    ingredientes: ['Base', 'Salsa', 'Queso', 'Carne', 'Pollo', 'Pepperoni', 'Tocineta'],
+  },
 ];
 
 /**
  * Estaciones de la Ronda 2 (microservicios). Cada estacion "posee" un
  * subconjunto de ingredientes = su responsabilidad, igual que un microservicio
  * es dueno de su propio dominio.
- *   - Masa    : Base + Salsa
- *   - Quesos  : Queso
- *   - Toppings: todo lo demas (los ingredientes que sobran)
- * El ORDEN del array define el flujo por el que pasa cada pizza.
+ *   - Masa    : bases y salsas (Base, Base integral, Salsa, Salsa blanca)
+ *   - Quesos  : quesos (Queso, Queso mozzarella, Queso cheddar)
+ *   - Toppings: todo lo demas
+ * Cada estacion tiene VARIEDAD de ingredientes reales, y las pizzas se arman
+ * eligiendo al azar entre los ingredientes de cada estacion (no siempre los
+ * mismos). El ORDEN del array define el flujo por el que pasa cada pizza.
  */
 const ESTACIONES = [
-  { id: 'masa', nombre: 'Masa', ingredientes: ['Base', 'Salsa'] },
-  { id: 'quesos', nombre: 'Quesos', ingredientes: ['Queso'] },
+  { id: 'masa', nombre: 'Masa', ingredientes: ['Base', 'Base integral', 'Salsa', 'Salsa blanca'] },
+  { id: 'quesos', nombre: 'Quesos', ingredientes: ['Queso', 'Queso mozzarella', 'Queso cheddar'] },
   {
     id: 'toppings',
     nombre: 'Toppings',
-    ingredientes: ['Pepperoni', 'Jamon', 'Pina', 'Champinones', 'Aceitunas', 'Cebolla'],
+    ingredientes: [
+      'Pepperoni',
+      'Jamon',
+      'Pina',
+      'Champinones',
+      'Aceitunas',
+      'Cebolla',
+      'Tocineta',
+      'Maiz',
+      'Pimenton',
+      'Tomate',
+      'Carne',
+      'Pollo',
+    ],
   },
 ];
 
@@ -64,108 +115,182 @@ const ESTACIONES = [
  * servidor solo acepta el string exacto del ingrediente real esperado).
  *
  * Cada clave es un ingrediente REAL (debe coincidir con INGREDIENTES) y su valor
- * es la lista de 9-10 señuelos parecidos a ese ingrediente.
+ * es la lista de 10-12 señuelos REALES y bien escritos, parecidos a ese
+ * ingrediente (variantes plausibles, no errores de tipeo).
  */
 const DECOYS = {
   Base: [
     'Base fina',
     'Base gruesa',
-    'Base integral',
     'Base rellena',
     'Base artesanal',
     'Base crocante',
     'Base delgada',
-    'Baste',
-    'Vase',
     'Base sin gluten',
+    'Base de masa madre',
+    'Base napolitana',
+    'Base con semillas',
+    'Base precocida',
+    'Base al horno',
+  ],
+  'Base integral': [
+    'Base integral fina',
+    'Base integral gruesa',
+    'Base integral artesanal',
+    'Base integral crocante',
+    'Base integral con semillas',
+    'Base integral de avena',
+    'Base multicereal',
+    'Base de centeno',
+    'Base de trigo integral',
+    'Base integral delgada',
+    'Base integral rellena',
+    'Base integral al horno',
   ],
   Salsa: [
     'Salsa BBQ',
     'Salsa picante',
-    'Salsa blanca',
     'Salsa rosa',
     'Salsa de tomate',
     'Salsa napolitana',
     'Salsa pesto',
-    'Zalsa',
-    'Salza',
     'Salsa casera',
+    'Salsa boloñesa',
+    'Salsa de ajo',
+    'Salsa marinara',
+    'Salsa carbonara',
+    'Salsa arrabiata',
+  ],
+  'Salsa blanca': [
+    'Salsa blanca casera',
+    'Salsa bechamel',
+    'Salsa alfredo',
+    'Salsa blanca de queso',
+    'Salsa blanca con ajo',
+    'Salsa blanca cremosa',
+    'Salsa blanca ligera',
+    'Salsa blanca al vino',
+    'Salsa blanca de champiñones',
+    'Salsa blanca especiada',
+    'Salsa blanca gratinada',
+    'Salsa blanca suave',
   ],
   Queso: [
     'Queso crema',
     'Queso azul',
     'Queso doble',
     'Queso rallado',
-    'Queso mozzarella',
     'Queso parmesano',
-    'Queso cheddar',
-    'Quezo',
-    'Qeso',
     'Queso fundido',
+    'Queso gouda',
+    'Queso provolone',
+    'Queso de cabra',
+    'Queso ricotta',
+    'Queso emmental',
+    'Queso manchego',
+  ],
+  'Queso mozzarella': [
+    'Queso mozzarella fresca',
+    'Queso mozzarella fundida',
+    'Queso mozzarella rallada',
+    'Queso mozzarella de bufala',
+    'Queso mozzarella light',
+    'Queso mozzarella ahumada',
+    'Queso mozzarella en bolas',
+    'Queso mozzarella gratinada',
+    'Queso mozzarella premium',
+    'Queso mozzarella en lonchas',
+    'Queso mozzarella artesanal',
+    'Queso mozzarella baja en sal',
+  ],
+  'Queso cheddar': [
+    'Queso cheddar rallado',
+    'Queso cheddar fundido',
+    'Queso cheddar maduro',
+    'Queso cheddar suave',
+    'Queso cheddar ahumado',
+    'Queso cheddar blanco',
+    'Queso cheddar naranja',
+    'Queso cheddar en lonchas',
+    'Queso cheddar fuerte',
+    'Queso cheddar premium',
+    'Queso cheddar artesanal',
+    'Queso cheddar curado',
   ],
   Pepperoni: [
-    'Peperoni',
-    'Pepperonni',
     'Pepperoni picante',
-    'Peperonni',
-    'Salami',
-    'Chorizo',
     'Pepperoni extra',
     'Pepperoni light',
-    'Peperony',
     'Pepperoni doble',
+    'Salami',
+    'Chorizo',
+    'Salchichon',
+    'Pepperoni ahumado',
+    'Pepperoni artesanal',
+    'Salami picante',
+    'Pepperoni curado',
+    'Pepperoni premium',
   ],
   // Nota: el ingrediente real se llama "Jamon" (sin tilde) para calzar con
-  // INGREDIENTES/PEDIDOS; los decoys si usan variantes con y sin tilde.
+  // INGREDIENTES/PEDIDOS; los decoys usan variantes reales bien escritas.
   Jamon: [
     'Jamon serrano',
-    'Jamón ahumado',
-    'Jamón york',
-    'Jamón cocido',
-    'Tocineta',
-    'Jamón',
-    'Jamón artesanal',
-    'Jamón premium',
-    'Jámon',
+    'Jamon ahumado',
+    'Jamon york',
+    'Jamon cocido',
+    'Jamon artesanal',
+    'Jamon premium',
     'Jamon dulce',
+    'Jamon ibérico',
+    'Jamon curado',
+    'Jamon de pavo',
+    'Jamon ahumado extra',
+    'Jamon en lonchas',
   ],
-  // El ingrediente real es "Pina" (sin tilde); los decoys incluyen "Piña" real.
+  // El ingrediente real (identificador interno) es "Pina" sin tilde, pero los
+  // decoys son texto de PRESENTACION: se escriben con la ortografia correcta.
   Pina: [
-    'Piña en almíbar',
+    'Piña en almibar',
     'Piña natural',
     'Piña dulce',
-    'Piña',
-    'Piñas',
-    'Duraznos',
     'Piña fresca',
-    'Piñá',
     'Piña troceada',
     'Piña asada',
+    'Piña caramelizada',
+    'Piña colada',
+    'Piña deshidratada',
+    'Piña en rodajas',
+    'Piña tropical',
+    'Piña glaseada',
   ],
-  // El ingrediente real es "Champinones" (sin tilde ni ñ).
+  // El identificador interno es "Champinones"; los decoys se muestran con ñ.
   Champinones: [
-    'Champiñón',
     'Champiñones frescos',
     'Champiñones en lata',
-    'Champiñon',
-    'Champiñones',
-    'Hongos',
-    'Setas',
     'Champiñones salteados',
     'Champiñones rebanados',
-    'Champiñónes',
+    'Champiñones laminados',
+    'Hongos',
+    'Setas',
+    'Portobello',
+    'Champiñones al ajillo',
+    'Champiñones enteros',
+    'Champiñones silvestres',
+    'Champiñones marinados',
   ],
   Aceitunas: [
     'Aceituna negra',
     'Aceituna verde',
     'Aceitunas rellenas',
-    'Aceituna',
     'Aceitunas kalamata',
     'Alcaparras',
     'Aceitunas picadas',
-    'Azeitunas',
     'Aceituna sin hueso',
     'Aceitunas enteras',
+    'Aceitunas marinadas',
+    'Aceitunas laminadas',
+    'Aceitunas manzanilla',
+    'Aceitunas gordal',
   ],
   Cebolla: [
     'Cebolla morada',
@@ -173,11 +298,97 @@ const DECOYS = {
     'Cebollín',
     'Cebolla blanca',
     'Cebolla roja',
-    'Cevolla',
     'Cebolla frita',
     'Cebolla dulce',
     'Cebolla picada',
-    'Cebollita',
+    'Cebolla en aros',
+    'Cebolla puerro',
+    'Cebolla asada',
+    'Cebolla encurtida',
+  ],
+  Tocineta: [
+    'Tocineta ahumada',
+    'Tocineta crocante',
+    'Tocineta en trozos',
+    'Tocineta ahumada extra',
+    'Panceta',
+    'Bacon',
+    'Tocineta de pavo',
+    'Tocineta curada',
+    'Tocino',
+    'Tocineta artesanal',
+    'Tocineta en tiras',
+    'Tocineta frita',
+  ],
+  Maiz: [
+    'Maíz dulce',
+    'Maíz tierno',
+    'Maíz amarillo',
+    'Maíz en grano',
+    'Maíz tostado',
+    'Maíz asado',
+    'Elote',
+    'Maíz desgranado',
+    'Maíz enlatado',
+    'Maíz blanco',
+    'Maíz baby',
+    'Choclo',
+  ],
+  Pimenton: [
+    'Pimentón rojo',
+    'Pimentón verde',
+    'Pimentón amarillo',
+    'Pimentón asado',
+    'Pimentón en tiras',
+    'Pimiento morrón',
+    'Pimentón dulce',
+    'Pimentón picante',
+    'Pimentón italiano',
+    'Pimentón salteado',
+    'Pimentón fresco',
+    'Pimentón troceado',
+  ],
+  Tomate: [
+    'Tomate cherry',
+    'Tomate en rodajas',
+    'Tomate seco',
+    'Tomate fresco',
+    'Tomate maduro',
+    'Tomate perita',
+    'Tomate rallado',
+    'Tomate confitado',
+    'Tomate asado',
+    'Tomate en cubos',
+    'Tomate verde',
+    'Tomate deshidratado',
+  ],
+  Carne: [
+    'Carne molida',
+    'Carne de res',
+    'Carne mechada',
+    'Carne desmechada',
+    'Carne a la plancha',
+    'Carne picada',
+    'Carne de cerdo',
+    'Carne asada',
+    'Carne sazonada',
+    'Carne en tiras',
+    'Carne guisada',
+    'Carne magra',
+  ],
+  Pollo: [
+    'Pollo desmechado',
+    'Pollo a la plancha',
+    'Pollo asado',
+    'Pollo en trozos',
+    'Pollo BBQ',
+    'Pollo apanado',
+    'Pollo teriyaki',
+    'Pollo marinado',
+    'Pollo grillado',
+    'Pollo al curry',
+    'Pollo en tiras',
+    'Pollo sazonado',
   ],
 };
 
@@ -204,17 +415,85 @@ function esIngredienteReal(texto) {
   return INGREDIENTES.includes(texto);
 }
 
+// Cimiento comun de TODA pizza (en el orden del flujo de estaciones):
+// Masa (Base + Salsa) -> Quesos (Queso). Se mantiene fijo para que la metafora
+// de microservicios por estacion tenga sentido (toda pizza pasa por esas
+// estaciones); lo que se arma al azar son los ingredientes de CADA estacion.
+
+// Pools por estacion: de aqui se elige al azar. Cada pizza toma 1 ingrediente
+// de Masa y 1 de Quesos (los "cualquiera de los que esten alli" que pediste) y
+// varios toppings. Se derivan de ESTACIONES para no duplicar la lista.
+const _estacionPorId = (id) => ESTACIONES.find((e) => e.id === id) || { ingredientes: [] };
+const POOL_MASA = _estacionPorId('masa').ingredientes.slice();
+const POOL_QUESOS = _estacionPorId('quesos').ingredientes.slice();
+const POOL_TOPPINGS = _estacionPorId('toppings').ingredientes.slice();
+
+// Cuantos toppings al azar lleva cada pizza (rango inclusivo).
+const TOPPINGS_MIN = 1;
+const TOPPINGS_MAX = 4;
+
+/** Devuelve una copia barajada del array (Fisher-Yates). */
+function _barajarArray(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+
+/** Elige un elemento al azar de un array (o null si esta vacio). */
+function _unoAlAzar(arr) {
+  return arr.length ? arr[Math.floor(Math.random() * arr.length)] : null;
+}
+
 /**
- * Elige un pedido al AZAR del catalogo, evitando repetir el mismo dos veces
- * seguidas. `pedidoAnterior` es el nombre del ultimo pedido servido (o null).
- * Asi la secuencia es distinta en cada partida y no se puede memorizar.
+ * Arma una pizza AL AZAR combinando cualquiera de los ingredientes disponibles.
+ *
+ * En vez de un cimiento fijo (Base + Salsa + Queso), cada pizza elige AL AZAR:
+ *   - 1 ingrediente de la estacion Masa   (Base / Base integral / Salsa / ...)
+ *   - 1 ingrediente de la estacion Quesos (Queso / Queso mozzarella / ...)
+ *   - entre TOPPINGS_MIN y TOPPINGS_MAX toppings de la estacion Toppings
+ * Asi cada pedido usa CUALQUIERA de los ingredientes que existen en cada
+ * estacion, no siempre los mismos. Los ingredientes van en el ORDEN del flujo
+ * de estaciones (Masa -> Quesos -> Toppings) para que el recorrido tenga sentido.
+ *
+ * El nombre se genera a partir de todos los ingredientes elegidos.
+ * `pedidoAnterior` es el nombre del pedido previo: si por casualidad sale
+ * identico, se vuelve a generar para no repetir dos veces seguidas.
  */
 function elegirPedidoAleatorio(pedidoAnterior) {
-  // Candidatos = todos menos el anterior (si hay mas de uno, siempre habra opciones).
-  const candidatos = PEDIDOS.filter((p) => p.nombre !== pedidoAnterior);
-  const pool = candidatos.length ? candidatos : PEDIDOS;
-  const base = pool[Math.floor(Math.random() * pool.length)];
-  return { nombre: base.nombre, ingredientes: base.ingredientes.slice() };
+  const generarUno = () => {
+    const masa = _unoAlAzar(POOL_MASA);
+    const queso = _unoAlAzar(POOL_QUESOS);
+    const cuantos =
+      TOPPINGS_MIN + Math.floor(Math.random() * (TOPPINGS_MAX - TOPPINGS_MIN + 1));
+    const toppings = _barajarArray(POOL_TOPPINGS).slice(0, cuantos);
+    // Orden del flujo de estaciones: primero Masa, luego Quesos, luego Toppings.
+    const ingredientes = [masa, queso, ...toppings].filter(Boolean);
+    // El nombre se arma con los toppings (lo que distingue a la pizza); si no
+    // hubiera, usamos el queso elegido como referencia.
+    const paraNombre = toppings.length ? toppings : [queso].filter(Boolean);
+    return { nombre: nombrePizza(paraNombre), ingredientes };
+  };
+
+  let pedido = generarUno();
+  // Evitar repetir exactamente el mismo pedido dos veces seguidas.
+  let intentos = 0;
+  while (pedido.nombre === pedidoAnterior && intentos < 8) {
+    pedido = generarUno();
+    intentos++;
+  }
+  return pedido;
+}
+
+/** Construye un nombre legible de la pizza a partir de sus toppings. */
+function nombrePizza(toppings) {
+  if (!toppings.length) return 'Pizza sencilla';
+  if (toppings.length === 1) return `Pizza de ${toppings[0]}`;
+  const ultimos = toppings.slice();
+  const ultimo = ultimos.pop();
+  return `Pizza de ${ultimos.join(', ')} y ${ultimo}`;
 }
 
 // Duracion FIJA de cada ronda: 10 minutos. La ronda termina por TIEMPO, no por

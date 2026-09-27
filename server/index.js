@@ -62,7 +62,16 @@ function servirEstatico(req, res) {
       return;
     }
     const ext = path.extname(filePath);
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+    const headers = { 'Content-Type': MIME[ext] || 'application/octet-stream' };
+    // Evitar que el navegador sirva JS/CSS/HTML viejos desde su cache: pedimos
+    // que SIEMPRE revalide. Asi los cambios de codigo (app.js, prof.js, styles)
+    // se ven al recargar la pagina, sin necesidad de forzar Ctrl+F5.
+    if (ext === '.js' || ext === '.css' || ext === '.html') {
+      headers['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+      headers['Pragma'] = 'no-cache';
+      headers['Expires'] = '0';
+    }
+    res.writeHead(200, headers);
     res.end(data);
   });
 }
@@ -160,13 +169,9 @@ hub.on('connection', (socket) => {
     if (r && !r.ok) socket.emit('aviso', { error: r.error });
   });
 
-  socket.on('entrar-a-ayudar', () => {
-    engine.entrarAAyudar(socket.id);
-  });
-
-  socket.on('cambiar-disponibilidad', ({ quiereDescansar } = {}) => {
-    engine.cambiarDisponibilidad(socket.id, !!quiereDescansar);
-  });
+  // Nota: en la Ronda 3 los jugadores YA NO controlan su disponibilidad. El
+  // escalado (despertar / dormir) es AUTOMATICO segun la hora pico que dispara el
+  // profesor. Por eso ya no hay handlers de 'entrar-a-ayudar' ni 'cambiar-disponibilidad'.
 
   socket.on('colocar-ingrediente', (payload = {}) => {
     engine.colocarIngrediente(socket.id, payload);
@@ -190,6 +195,14 @@ hub.on('connection', (socket) => {
   socket.on('mostrar-preguntas', ({ salaId } = {}) => {
     if (!esProfesor(socket.id)) return;
     engine.mostrarPreguntas(salaId);
+  });
+
+  // El profesor dispara la HORA PICO de la Ronda 3 (llegan 2-3 pedidos a la vez).
+  socket.on('activar-hora-pico', ({ salaId } = {}) => {
+    if (!esProfesor(socket.id)) return;
+    const r = engine.activarHoraPico(salaId);
+    if (r && !r.ok) socket.emit('aviso', { error: r.error });
+    else difundirTodo();
   });
 
   // --- Desconexion --------------------------------------------------------

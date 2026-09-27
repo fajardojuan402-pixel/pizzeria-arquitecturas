@@ -36,6 +36,8 @@ const SALAS = ['sala1', 'sala2'];
 const MIN_JUGADORES = 2;
 const MAX_JUGADORES = 3;
 const RECONEXION_MS = 60000; // ventana de 1 minuto para recuperar rol por nombre
+// Tope de horas pico que el profesor puede dejar encoladas (evita spam del boton).
+const MAX_PICOS_EN_COLA = 10;
 
 // --- Utilidades pequenas -------------------------------------------------
 
@@ -102,13 +104,25 @@ function armarGrid(reales, decoys, min, max) {
  *   - los decoys de cada ingrediente de esa receta (9-10 c/u),
  *   - ademas decoys de ingredientes que NI SIQUIERA estan en la receta (relleno).
  * Sin agrupar por familia: todo mezclado, para simular el caos de un monolito
- * sin separacion de responsabilidades. Cabe todo el catalogo de decoys (90),
+ * sin separacion de responsabilidades. Cabe todo el catalogo de decoys (~180),
  * asi que siempre alcanza el rango 60-80.
  */
 function gridRonda1(ingredientesReceta) {
   const reales = ingredientesReceta.slice();
   // Decoys candidatos = TODOS (los de la receta + los de familias ajenas de relleno).
-  return armarGrid(reales, TODOS_LOS_DECOYS, GRID_R1_MIN, GRID_R1_MAX);
+  const grid = armarGrid(reales, TODOS_LOS_DECOYS, GRID_R1_MIN, GRID_R1_MAX);
+  // Garantia: la PRIMERA casilla siempre es un señuelo (no un ingrediente real),
+  // sin cambiar que casillas aparecen (el conjunto es el mismo, solo el orden de
+  // la primera). Asi "tomar la primera casilla que no es real" siempre cae en un
+  // decoy verdadero (nunca avanza el pedido), lo que mantiene el juego coherente.
+  const primeraEsReal = INGREDIENTES.includes(grid[0]);
+  if (primeraEsReal) {
+    const idxDecoy = grid.findIndex((x) => !INGREDIENTES.includes(x));
+    if (idxDecoy > 0) {
+      [grid[0], grid[idxDecoy]] = [grid[idxDecoy], grid[0]];
+    }
+  }
+  return grid;
 }
 
 /**
@@ -259,6 +273,10 @@ class GameEngine {
         previo.desconectadoEn = null;
         previo.socketId = socketId;
         this.playerBySocket.set(socketId, { salaId, playerId: previo.id });
+        // Si volvio durante la Ronda 3, aseguramos que tenga estado coherente y
+        // re-sincronizamos las personas (su reincorporacion puede cambiar la
+        // capacidad disponible para la demanda actual).
+        this._repararEstadoR3AlReconectar(sala, previo.id);
         this.onUpdate(salaId);
         return { ok: true, playerId: previo.id, reconectado: true };
       }
@@ -310,6 +328,11 @@ class GameEngine {
     if (!jugador) return;
     jugador.conectado = false;
     jugador.desconectadoEn = ahora();
+
+    // Si estamos en Ronda 3, un jugador que se cae NO debe seguir contando como
+    // cocinero activo (fantasma). Cerramos su tramo de tiempo, reasignamos el
+    // cocinero base si era el, y re-sincronizamos personas para que otro cubra.
+    this._manejarDesconexionR3(sala, ref.playerId);
 
     // Purga diferida: si no vuelve en la ventana, se elimina el registro.
     this._timer(
@@ -589,16 +612,32 @@ class GameEngine {
     sala.ronda = {
       tipo: 3,
       fase: 'jugando',
-      // Las rafagas se generan BAJO DEMANDA (no una secuencia fija): cada nueva
-      // rafaga decide al azar si es normal o "¡HORA PICO!". La ronda dura por
-      // tiempo, asi que se generan rafagas indefinidamente hasta agotar el reloj.
+      // Flujo NORMAL: 1 pizza a la vez, atendida por el jugador base activo.
+      // La HORA PICO ya NO es aleatoria: la dispara el PROFESOR (activarHoraPico),
+      // y entonces llegan 2 o 3 pedidos a la vez. Los demas jugadores despiertan
+      // (pagando cold start) para cubrir la demanda; al terminar la rafaga pico
+      // vuelven a descansar automaticamente.
       seqRafaga: 0, // contador para ids unicos de pizza por rafaga
       pedidoAnterior: null, // para no repetir el mismo pedido dos veces seguidas
       // estado por jugador: 'activo' | 'descansando' | 'coldstart'
       estados: {},
+      // Jugador que arranca activo y se queda activo en el flujo normal (el resto
+      // solo se activa durante la hora pico y luego vuelve a descansar).
+      activoBaseId: null,
       coldHasta: {}, // playerId -> timestamp fin de cold start
+      // Tracking de tiempo por jugador para el resumen "dormido vs activo".
+      // tiempoEstado[pid] = { activo, descansando, coldstart } en ms acumulados.
+      // ultimoCambio[pid] = timestamp del ultimo cambio de estado de ese jugador.
+      tiempoEstado: {},
+      ultimoCambio: {},
       pizzasActivas: [], // pizzas visibles de la rafaga actual
       horaPicoActual: false,
+      // COLA de horas pico pendientes (numeros = cuantas preparaciones tendra
+      // cada una). El profesor puede encolar varias; se ejecutan UNA tras otra:
+      // cuando termina la hora pico activa, si hay pendientes, entra la siguiente
+      // (si no, se vuelve al flujo normal). Activar una nueva mientras hay otra en
+      // curso NO reemplaza ni reordena: solo agrega al final de esta cola.
+      picosPendientes: [],
       // grids: cuadricula (reales + decoys, barajada) POR pizza activa. Misma
       // logica de decoys que la Ronda 2 (tamaño manejable 25-35), independiente
       // por cada pizza de la rafaga; se re-baraja al hacer un clic correcto.
@@ -609,25 +648,39 @@ class GameEngine {
       metricas: { completados: 0, coldStarts: 0, tiempoColdMs: 0 },
     };
     // El primer jugador (orden de llegada) arranca activo; el resto descansa.
+    const t0 = ahora();
     conectados.forEach((j, i) => {
       sala.ronda.estados[j.id] = i === 0 ? 'activo' : 'descansando';
       j.rol = i === 0 ? 'Activo' : 'Descansando';
+      sala.ronda.tiempoEstado[j.id] = { activo: 0, descansando: 0, coldstart: 0 };
+      sala.ronda.ultimoCambio[j.id] = t0;
+      if (i === 0) sala.ronda.activoBaseId = j.id;
     });
     this._arrancarCronometroRonda(sala); // cuenta regresiva de 10 min
-    this._cargarRafagaRonda3(sala);
+    // Arranca en flujo normal: un solo pedido a la vez (sin hora pico).
+    this._cargarPedidoNormalR3(sala);
   }
 
   /**
-   * Genera y carga UNA nueva rafaga al azar como pizzas activas:
-   *  - Con probabilidad PROB_HORA_PICO (~28%) es "¡HORA PICO!" (2 o 3 pizzas).
-   *  - Si no, es un pedido normal (1 pizza).
-   * Cada pizza usa un pedido aleatorio sin repetir el anterior. Como es bajo
-   * demanda, la secuencia es distinta en cada partida (no memorizable).
+   * Acumula el tiempo que un jugador estuvo en su estado ACTUAL desde el ultimo
+   * cambio y reinicia el reloj. Se llama justo ANTES de cambiar el estado del
+   * jugador (o al finalizar la ronda) para no perder el ultimo tramo.
    */
-  _cargarRafagaRonda3(sala) {
+  _acumularTiempoR3(sala, pid, hasta) {
     const r = sala.ronda;
-    const horaPico = Math.random() < PROB_HORA_PICO;
-    const cantidad = horaPico ? 2 + Math.floor(Math.random() * 2) : 1; // 2 o 3 en pico
+    if (!r || !r.tiempoEstado || !r.tiempoEstado[pid]) return;
+    const estado = r.estados[pid];
+    const desde = r.ultimoCambio[pid] || hasta;
+    const delta = Math.max(0, hasta - desde);
+    if (estado && r.tiempoEstado[pid][estado] != null) {
+      r.tiempoEstado[pid][estado] += delta;
+    }
+    r.ultimoCambio[pid] = hasta;
+  }
+
+  /** Construye `cantidad` pizzas nuevas (pedidos al azar) y las deja activas. */
+  _generarPizzasR3(sala, cantidad) {
+    const r = sala.ronda;
     const pizzas = [];
     for (let k = 0; k < cantidad; k++) {
       const pedido = generarPedido(r.pedidoAnterior);
@@ -642,22 +695,162 @@ class GameEngine {
     }
     r.seqRafaga++;
     r.pizzasActivas = pizzas;
-    r.horaPicoActual = horaPico;
-    // Cuadricula de decoys por cada pizza visible de la rafaga (ya barajada).
+    // Cuadricula de decoys por cada pizza visible (ya barajada).
     r.grids = {};
     for (const p of r.pizzasActivas) r.grids[p.id] = gridPizza(p.ingredientes);
   }
 
-  /** Un jugador que descansa decide "Entrar a ayudar" -> inicia cold start. */
-  entrarAAyudar(socketId) {
-    const ref = this.playerBySocket.get(socketId);
-    if (!ref) return;
-    const sala = this.getSala(ref.salaId);
-    if (!sala || !sala.ronda || sala.ronda.tipo !== 3) return;
+  /**
+   * Flujo NORMAL: carga UN solo pedido a la vez (sin hora pico). Lo atiende el
+   * jugador base activo. Cuando lo completa, entra otro pedido normal.
+   */
+  _cargarPedidoNormalR3(sala) {
     const r = sala.ronda;
-    const pid = ref.playerId;
-    if (r.estados[pid] !== 'descansando') return; // ya esta activo o en cold start
+    r.horaPicoActual = false;
+    this._generarPizzasR3(sala, 1);
+    // Flujo normal = 1 preparacion -> 1 cocinero. Sincroniza (duerme sobrantes,
+    // o despierta al base si por alguna razon no habia nadie activo).
+    this._sincronizarPersonasR3(sala);
+  }
 
+  /**
+   * HORA PICO (disparada por el PROFESOR). Cada hora pico trae 2 o 3
+   * preparaciones (nunca mas que jugadores conectados, para que sea cubrible).
+   *
+   * COLA / ACUMULACION: el profesor puede activar varias horas pico.
+   *  - Si NO hay ninguna hora pico en curso, esta empieza de inmediato.
+   *  - Si YA hay una en curso, la nueva NO la reemplaza ni reordena nada: queda
+   *    PENDIENTE en una cola y se ejecutara cuando termine la actual (y las que
+   *    esten antes en la cola). Asi se encadenan: pico(2) -> pico(3) -> pico(2)...
+   *
+   * No hace nada si la ronda no esta en R3.
+   */
+  activarHoraPico(salaId) {
+    const sala = this.getSala(salaId);
+    if (!sala || !sala.ronda || sala.ronda.tipo !== 3) {
+      return { ok: false, error: 'No hay una Ronda 3 en curso en esa sala.' };
+    }
+    const r = sala.ronda;
+    if (r.fase !== 'jugando') return { ok: false, error: 'La ronda no esta activa.' };
+
+    // Cantidad de preparaciones de ESTA hora pico: entre 2 y 3, pero nunca mas
+    // que jugadores conectados (asi la demanda es cubrible).
+    const totalJugadores = this.jugadoresConectados(sala).length;
+    if (totalJugadores < MIN_JUGADORES) {
+      return { ok: false, error: 'Se necesitan al menos 2 jugadores conectados.' };
+    }
+    const maxPedidos = Math.min(3, Math.max(2, totalJugadores));
+    const cantidad = 2 + Math.floor(Math.random() * (maxPedidos - 2 + 1)); // 2..maxPedidos
+
+    if (r.horaPicoActual) {
+      // Ya hay una hora pico en curso: la nueva queda PENDIENTE en la cola.
+      // Acotamos la cola para evitar que el spam del boton la haga crecer sin fin.
+      if (r.picosPendientes.length >= MAX_PICOS_EN_COLA) {
+        return { ok: false, error: `Cola de horas pico llena (max ${MAX_PICOS_EN_COLA}).` };
+      }
+      r.picosPendientes.push(cantidad);
+      this.onUpdate(sala.id);
+      return { ok: true, encolada: true, posicion: r.picosPendientes.length };
+    }
+
+    // No hay hora pico activa: arranca de inmediato.
+    this._arrancarHoraPico(sala, cantidad);
+    this.onUpdate(sala.id);
+    return { ok: true, encolada: false };
+  }
+
+  /**
+   * Arranca una hora pico con `cantidad` preparaciones: genera esas pizzas como
+   * rafaga activa, marca la hora pico y sincroniza las personas segun la demanda.
+   */
+  _arrancarHoraPico(sala, cantidad) {
+    const r = sala.ronda;
+    this._generarPizzasR3(sala, cantidad);
+    r.horaPicoActual = true;
+    // Ajusta cuantos cocineros hay segun las preparaciones activas (sube o baja).
+    this._sincronizarPersonasR3(sala);
+  }
+
+  /**
+   * NUCLEO del escalado serverless: hace que el numero de cocineros ACTIVOS (o
+   * arrancando) sea EXACTAMENTE el necesario segun las preparaciones PENDIENTES.
+   *
+   *   necesarios = clamp(preparaciones pendientes, 1, jugadores conectados)
+   *
+   * Reglas:
+   *   - 1 preparacion  -> 1 persona.  2 -> 2.  3 -> 3.  (tope = jugadores)
+   *   - Nunca crea/activa mas personas de las necesarias (no hay cocineros de mas).
+   *   - Escala HACIA ARRIBA despertando dormidos (cold start), y HACIA ABAJO
+   *     poniendo a descansar a los sobrantes. Prioriza mantener activo al
+   *     `activoBaseId` (el cocinero base del flujo normal).
+   *   - Nunca toca a un jugador desconectado ni cuenta como cocinero a un
+   *     desconectado (los fantasmas no cubren demanda).
+   *   - No interrumpe un cold start en curso al escalar hacia abajo (deja que
+   *     termine; contara como capacidad).
+   *
+   * Es idempotente: llamarla varias veces con el mismo estado no cambia nada.
+   */
+  _sincronizarPersonasR3(sala) {
+    const r = sala.ronda;
+    if (!r || r.tipo !== 3) return;
+
+    const conectados = this.jugadoresConectados(sala).map((j) => j.id);
+    const conectadosSet = new Set(conectados);
+    if (conectados.length === 0) return;
+
+    const pendientes = r.pizzasActivas.filter((p) => !p.completada).length;
+    // Al menos 1 cocinero (para el flujo normal); nunca mas que preparaciones ni
+    // que jugadores conectados.
+    const necesarios = Math.max(1, Math.min(pendientes || 1, conectados.length));
+
+    // Capacidad actual = jugadores CONECTADOS activos o arrancando (cold start).
+    const disponibles = conectados.filter(
+      (pid) => r.estados[pid] === 'activo' || r.estados[pid] === 'coldstart'
+    );
+
+    if (disponibles.length < necesarios) {
+      // Faltan cocineros: despertamos dormidos conectados (preferir base primero).
+      let faltan = necesarios - disponibles.length;
+      const dormidos = conectados.filter((pid) => r.estados[pid] === 'descansando');
+      dormidos.sort((a, b) => (a === r.activoBaseId ? -1 : b === r.activoBaseId ? 1 : 0));
+      for (const pid of dormidos) {
+        if (faltan <= 0) break;
+        this._iniciarColdStart(sala, pid);
+        faltan--;
+      }
+    } else if (disponibles.length > necesarios) {
+      // Sobran cocineros: dormimos a los 'activo' de mas. No interrumpimos cold
+      // starts en curso (dejamos que terminen) y preservamos al base activo lo
+      // mas posible -> lo ponemos al FINAL de la lista de candidatos a dormir.
+      let sobran = disponibles.length - necesarios;
+      const activosNoBase = conectados.filter(
+        (pid) => r.estados[pid] === 'activo' && pid !== r.activoBaseId
+      );
+      const baseActivo = conectados.filter(
+        (pid) => r.estados[pid] === 'activo' && pid === r.activoBaseId
+      );
+      const candidatos = activosNoBase.concat(baseActivo); // base al final
+      for (const pid of candidatos) {
+        if (sobran <= 0) break;
+        this._acumularTiempoR3(sala, pid, ahora());
+        r.estados[pid] = 'descansando';
+        const j = sala.jugadores.get(pid);
+        if (j) j.rol = 'Descansando';
+        sobran--;
+      }
+    }
+  }
+
+  /**
+   * Arranca el COLD START de un jugador dormido (pasa a 'coldstart' y, tras
+   * COLD_START_MS, a 'activo'). Es el mecanismo de escalado automatico: ya no lo
+   * dispara el jugador, sino el sistema al activarse la hora pico.
+   */
+  _iniciarColdStart(sala, pid) {
+    const r = sala.ronda;
+    if (!r || r.estados[pid] !== 'descansando') return;
+
+    this._acumularTiempoR3(sala, pid, ahora()); // cierra el tramo "descansando"
     r.estados[pid] = 'coldstart';
     r.coldHasta[pid] = ahora() + COLD_START_MS;
     r.metricas.coldStarts++;
@@ -669,6 +862,7 @@ class GameEngine {
       () => {
         // Al terminar el cold start pasa a activo (si sigue en la ronda).
         if (r.estados[pid] === 'coldstart') {
+          this._acumularTiempoR3(sala, pid, ahora()); // cierra el tramo "coldstart"
           r.estados[pid] = 'activo';
           r.metricas.tiempoColdMs += COLD_START_MS;
           const j = sala.jugadores.get(pid);
@@ -678,22 +872,56 @@ class GameEngine {
       },
       COLD_START_MS
     );
-    this.onUpdate(sala.id);
   }
 
-  /** Tras una rafaga, un jugador elige volver a descansar o seguir activo. */
-  cambiarDisponibilidad(socketId, quiereDescansar) {
-    const ref = this.playerBySocket.get(socketId);
-    if (!ref) return;
-    const sala = this.getSala(ref.salaId);
-    if (!sala || !sala.ronda || sala.ronda.tipo !== 3) return;
+  /**
+   * Maneja la desconexion de un jugador durante la Ronda 3 para no dejar estados
+   * inconsistentes (cocineros fantasma). Cierra su tramo de tiempo, reasigna el
+   * cocinero base si era el, y re-sincroniza personas para que otro cubra la
+   * demanda. No borra su registro (eso lo hace la purga diferida por ventana).
+   */
+  _manejarDesconexionR3(sala, pid) {
     const r = sala.ronda;
-    const pid = ref.playerId;
-    if (r.estados[pid] === 'coldstart') return; // no se puede cambiar en pleno arranque
-    r.estados[pid] = quiereDescansar ? 'descansando' : 'activo';
-    const j = sala.jugadores.get(pid);
-    if (j) j.rol = quiereDescansar ? 'Descansando' : 'Activo';
-    this.onUpdate(sala.id);
+    if (!r || r.tipo !== 3 || r.fase === 'completada') return;
+
+    // Cierra su acumulado de tiempo en el estado actual (para el resumen) y lo
+    // marca como 'descansando' para que no quede como cocinero fantasma "activo".
+    this._acumularTiempoR3(sala, pid, ahora());
+    if (r.estados[pid] === 'activo' || r.estados[pid] === 'coldstart') {
+      r.estados[pid] = 'descansando';
+      const j = sala.jugadores.get(pid);
+      if (j) j.rol = 'Descansando';
+    }
+
+    // Si el que se cae era el cocinero base, reasignamos base a un conectado.
+    if (r.activoBaseId === pid) {
+      const reemplazo = this.jugadoresConectados(sala).find((j) => j.id !== pid);
+      r.activoBaseId = reemplazo ? reemplazo.id : null;
+    }
+
+    // Re-sincroniza: si el desconectado cubria una preparacion, otro conectado
+    // se activara (cold start) para no dejar la demanda sin cocinero.
+    this._sincronizarPersonasR3(sala);
+  }
+
+  /**
+   * Al reconectar en Ronda 3, garantiza que el jugador tenga estado coherente
+   * (si su registro sobrevivio, mantiene su estado; si faltara algun campo de
+   * tracking, lo reinicializa) y re-sincroniza personas segun la demanda actual.
+   */
+  _repararEstadoR3AlReconectar(sala, pid) {
+    const r = sala.ronda;
+    if (!r || r.tipo !== 3 || r.fase === 'completada') return;
+
+    // Asegura estructuras de estado/tracking del jugador reconectado.
+    if (!r.estados[pid]) r.estados[pid] = 'descansando';
+    if (!r.tiempoEstado[pid]) r.tiempoEstado[pid] = { activo: 0, descansando: 0, coldstart: 0 };
+    r.ultimoCambio[pid] = ahora();
+    // Si no hay cocinero base valido (p.ej. el anterior se fue), este puede serlo.
+    if (!r.activoBaseId || !this.jugadoresConectados(sala).some((j) => j.id === r.activoBaseId)) {
+      r.activoBaseId = pid;
+    }
+    this._sincronizarPersonasR3(sala);
   }
 
   // =======================================================================
@@ -863,18 +1091,48 @@ class GameEngine {
     r.grids[pizza.id] = gridPizza(pizza.ingredientes);
     if (pizza.progreso.length === pizza.ingredientes.length) {
       pizza.completada = true;
+      // Una preparacion menos pendiente -> re-sincronizamos personas: si ahora
+      // sobran cocineros para las preparaciones que quedan, los sobrantes se
+      // duermen (personas = preparaciones pendientes).
+      this._sincronizarPersonasR3(sala);
     }
 
     // La rafaga se completa cuando TODAS sus pizzas estan listas.
     if (r.pizzasActivas.every((p) => p.completada)) {
       r.metricas.completados++; // cada rafaga cuenta como 1 "pedido" completado
-      // La ronda dura por tiempo: al terminar una rafaga se genera otra nueva
-      // (normal o pico, al azar) hasta que el cronometro llegue a 0. Los que esten
-      // 'activo' siguen activos (NO repiten cold start); los que descansan veran
-      // la notificacion si la nueva rafaga es de hora pico.
-      this._cargarRafagaRonda3(sala);
+      this._r3RafagaCompletada(sala);
     }
     this.onUpdate(sala.id);
+  }
+
+  /**
+   * Cierra la rafaga actual y prepara la siguiente, respetando la COLA de horas
+   * pico:
+   *  - Si la rafaga era una HORA PICO y quedan horas pico PENDIENTES en la cola,
+   *    arranca DIRECTAMENTE la siguiente (se encadenan pico -> pico -> ...).
+   *  - Si la rafaga era una hora pico y la cola esta vacia, termina la hora pico:
+   *    los ayudantes (todos menos el activo base) VUELVEN A DESCANSAR y se vuelve
+   *    al flujo normal (1 pedido a la vez).
+   *  - Si la rafaga era normal, revisa la cola: si hay una hora pico pendiente la
+   *    arranca; si no, entra otro pedido normal.
+   * La ronda dura por tiempo: se siguen generando pedidos hasta agotar el reloj.
+   */
+  _r3RafagaCompletada(sala) {
+    const r = sala.ronda;
+
+    // ¿Hay una hora pico esperando en la cola? Si la hay, la siguiente rafaga
+    // es esa hora pico (se ejecutan una tras otra, sin cambiar su orden).
+    if (r.picosPendientes.length > 0) {
+      const cantidad = r.picosPendientes.shift();
+      r.horaPicoActual = false; // se reactivara dentro de _arrancarHoraPico
+      this._arrancarHoraPico(sala, cantidad); // genera pizzas + sincroniza personas
+      return;
+    }
+
+    // No hay mas horas pico en cola: volvemos al flujo normal (1 pedido).
+    // _cargarPedidoNormalR3 genera la pizza normal y _sincronizarPersonasR3 deja
+    // exactamente 1 cocinero activo (duerme a los ayudantes sobrantes).
+    this._cargarPedidoNormalR3(sala);
   }
 
   // =======================================================================
@@ -896,6 +1154,16 @@ class GameEngine {
       }
     }
 
+    // Ronda 3: cerramos el ultimo tramo de tiempo de cada jugador y calculamos
+    // el % que cada uno paso dormido vs. activo (contando el cold start como
+    // "arrancando", ni dormido ni productivo). Esto alimenta el resumen.
+    if (r.tipo === 3 && r.tiempoEstado) {
+      for (const pid of Object.keys(r.tiempoEstado)) {
+        this._acumularTiempoR3(sala, pid, r.fin);
+      }
+      r.metricas.tiempoPorJugador = this._resumenTiempoR3(sala, r);
+    }
+
     r.fase = 'completada';
     sala.estado = 'completada';
     this._limpiarTimers(sala);
@@ -908,6 +1176,33 @@ class GameEngine {
     if (r.tipo === 3) sala.mostrarPreguntas = true;
 
     this.onUpdate(sala.id);
+  }
+
+  /**
+   * Calcula, por jugador, el % de tiempo que paso dormido (descansando) vs.
+   * activo durante la Ronda 3. El "coldstart" se reporta aparte como arranque
+   * (tiempo que no fue ni descanso puro ni trabajo productivo). Devuelve una
+   * lista [{ nombre, dormidoMs, activoMs, coldMs, pctDormido, pctActivo }].
+   */
+  _resumenTiempoR3(sala, r) {
+    const lista = [];
+    for (const pid of Object.keys(r.tiempoEstado)) {
+      const t = r.tiempoEstado[pid];
+      const dormidoMs = t.descansando || 0;
+      const activoMs = t.activo || 0;
+      const coldMs = t.coldstart || 0;
+      const total = dormidoMs + activoMs + coldMs;
+      const jugador = sala.jugadores.get(pid);
+      lista.push({
+        nombre: jugador ? jugador.nombre : pid,
+        dormidoMs,
+        activoMs,
+        coldMs,
+        pctDormido: total > 0 ? Math.round((dormidoMs / total) * 100) : 0,
+        pctActivo: total > 0 ? Math.round((activoMs / total) * 100) : 0,
+      });
+    }
+    return lista;
   }
 
   /**
@@ -932,6 +1227,8 @@ class GameEngine {
         tiempoTotalMs,
         completados,
         bloqueos: r.metricas.bloqueos,
+        // Tiempo total perdido con TODA la produccion detenida (cada bloqueo dura BLOQUEO_MS).
+        tiempoBloqueoMs: r.metricas.bloqueos * BLOQUEO_MS,
         narrativa:
           `En ${duracion} el unico cocinero completo ${completados} pizza(s) y quedo ` +
           `bloqueado ${r.metricas.bloqueos} vez/veces. Como en un monolito, cada bloqueo ` +
@@ -963,6 +1260,8 @@ class GameEngine {
       completados,
       coldStarts: r.metricas.coldStarts,
       tiempoColdMs: r.metricas.tiempoColdMs,
+      // Desglose por jugador de % dormido vs. activo (vacio si no se calculo).
+      tiempoPorJugador: r.metricas.tiempoPorJugador || [],
       narrativa:
         `En ${duracion} se atendieron ${completados} pedido(s) con ${r.metricas.coldStarts} ` +
         `cold start(s), perdiendo ${(r.metricas.tiempoColdMs / 1000).toFixed(0)}s en arranques. ` +
@@ -1022,6 +1321,23 @@ class GameEngine {
         // Pedidos completados en la ronda en curso (para verlo en vivo).
         completadosActual:
           sala.estado === 'jugando' && sala.ronda ? sala.ronda.metricas.completados : 0,
+        // Ronda 3: si es la ronda en curso, exponemos si hay hora pico activa y
+        // cuantos pedidos hay ahora mismo (para el control del profesor).
+        esRonda3:
+          sala.estado === 'jugando' && sala.ronda && sala.ronda.tipo === 3,
+        horaPicoActiva:
+          sala.estado === 'jugando' && sala.ronda && sala.ronda.tipo === 3
+            ? !!sala.ronda.horaPicoActual
+            : false,
+        pedidosActivos:
+          sala.estado === 'jugando' && sala.ronda && sala.ronda.tipo === 3
+            ? sala.ronda.pizzasActivas.filter((p) => !p.completada).length
+            : 0,
+        // Horas pico ENCOLADAS (pendientes de ejecutarse tras la actual).
+        picosPendientes:
+          sala.estado === 'jugando' && sala.ronda && sala.ronda.tipo === 3
+            ? sala.ronda.picosPendientes.slice()
+            : [],
       };
     }
     return { salas, preguntas: PREGUNTAS_DISCUSION };

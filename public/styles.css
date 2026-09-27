@@ -264,10 +264,15 @@ button.ghost {
   color: #166534;
 }
 
-/* Tarjetas de pizza (Ronda 2 y 3) */
+/* Tarjetas de pizza (Ronda 2 y 3).
+   Las tarjetas son ANCHAS (minimo ~520px) para que la cuadricula de ingredientes
+   de su interior se despliegue en varias columnas, igual que el "mar" de la
+   Ronda 1, en vez de quedar apretada en una sola columna. Si hay espacio para
+   dos tarjetas anchas, se acomodan lado a lado; si no, cada una ocupa el ancho
+   completo. En pantallas pequenas siempre ocupa el 100%. */
 .pizzas {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 520px), 1fr));
   gap: 12px;
 }
 .pizza {
